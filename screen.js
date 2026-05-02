@@ -1006,8 +1006,13 @@ function createFactory() {
             // Splitscreen: append to the panel bar.
             anchor.appendChild(gear);
         } else {
-            // Main-player: insert before the close button.
-            const closeBtn = anchor.querySelector('button:last-child');
+            // Main-player: insert before the last direct-child button (✕ Close).
+            // Use ':scope > button' to restrict to direct children — a plain
+            // 'button:last-child' traverses the full subtree and can match a
+            // nested button (e.g. inside #mixer-anchor) that is not a direct
+            // child of anchor, causing insertBefore to throw NotFoundError.
+            const btns = anchor.querySelectorAll(':scope > button');
+            const closeBtn = btns.length ? btns[btns.length - 1] : null;
             if (closeBtn) anchor.insertBefore(gear, closeBtn);
             else anchor.appendChild(gear);
         }
