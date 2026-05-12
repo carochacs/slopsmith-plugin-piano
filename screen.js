@@ -1590,6 +1590,15 @@ function createFactory() {
             _prevHighwayDisplay = '';
         }
 
+        // Removing our gear may unwrap #player-controls back to one
+        // row, which would leave the host's canvas style.height at our
+        // smaller-bar value and the next renderer drawing into an
+        // undersized box. Re-trigger the host's measure pass to match
+        // the post-teardown DOM. Best-effort — host may already be
+        // gone if the page is unloading.
+        try { window.highway && window.highway.resize && window.highway.resize(); }
+        catch (e) { console.warn('[Piano] host resize on teardown failed:', e); }
+
         _latestNotes = null;
         _latestChords = null;
         _latestTime = 0;
@@ -1659,6 +1668,20 @@ function createFactory() {
             if (_highwayCanvas) _highwayCanvas.style.visibility = 'hidden';
 
             _injectSettingsGear();
+            // The host sizes the highway canvas to
+            // `documentElement.clientHeight - controls.offsetHeight` and
+            // bakes it into the canvas's inline style — not via flex.
+            // Injecting the gear above can push #player-controls onto a
+            // second row, growing its offsetHeight, but the host's last
+            // resize captured the PRE-injection height, so
+            // _highwayCanvas.style.height is now stale (too tall) and
+            // our overlay would inherit that stale height and paint
+            // the keyboard down into the controls. Ask the host to
+            // re-measure before we size the overlay. Safe to call
+            // during init: _rendererInited is still false on the host
+            // side, so it won't recurse back into our resize().
+            try { window.highway && window.highway.resize && window.highway.resize(); }
+            catch (e) { console.warn('[Piano] host resize after gear inject failed:', e); }
             _applyCanvasDims();
             window.addEventListener('resize', _onWinResize);
 
