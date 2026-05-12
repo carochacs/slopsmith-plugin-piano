@@ -1676,13 +1676,34 @@ function createFactory() {
             // resize captured the PRE-injection height, so
             // _highwayCanvas.style.height is now stale (too tall) and
             // our overlay would inherit that stale height and paint
-            // the keyboard down into the controls. Ask the host to
-            // re-measure before we size the overlay. Safe to call
-            // during init: _rendererInited is still false on the host
-            // side, so it won't recurse back into our resize().
-            try { window.highway && window.highway.resize && window.highway.resize(); }
-            catch (e) { console.warn('[Piano] host resize after gear inject failed:', e); }
-            _applyCanvasDims();
+            // the keyboard down into the controls.
+            //
+            // Same-tick host.resize() turns out NOT to be enough: at
+            // least one browser path (observed on the slopsmith web
+            // app) doesn't commit the flex-wrap row change before the
+            // synchronous offsetHeight read inside host.resize(), so
+            // the resize uses the pre-wrap height and the canvas
+            // remains too tall. A manual user-driven window resize a
+            // moment later fixes it — i.e. once layout has settled.
+            // Mirror that by running an initial sync pass for the
+            // happy case AND a follow-up rAF pass that fires after
+            // the browser's post-mutation layout commit.
+            //
+            // Safe during init: host.resize() only recurses into our
+            // resize() when _rendererInited is true, and the host
+            // hasn't flipped it yet (it does so only after init()
+            // returns successfully).
+            const _resyncFromHost = () => {
+                try { window.highway && window.highway.resize && window.highway.resize(); }
+                catch (e) { console.warn('[Piano] host resize failed:', e); }
+                _applyCanvasDims();
+            };
+            _resyncFromHost();
+            requestAnimationFrame(() => {
+                // Bail if a teardown happened before the frame fired.
+                if (!_pianoCanvas || !_pianoCtx) return;
+                _resyncFromHost();
+            });
             window.addEventListener('resize', _onWinResize);
 
             const ss = window.slopsmithSplitscreen;
