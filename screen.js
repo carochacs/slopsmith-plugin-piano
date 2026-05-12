@@ -1578,7 +1578,7 @@ function createFactory() {
         _releaseAllHeld();
 
         if (_highwayCanvas) {
-            _highwayCanvas.style.display = _prevHighwayDisplay;
+            _highwayCanvas.style.visibility = _prevHighwayDisplay;
             _highwayCanvas = null;
             _prevHighwayDisplay = '';
         }
@@ -1624,7 +1624,14 @@ function createFactory() {
             _instanceDestroyed = false;
 
             _highwayCanvas = canvas;
-            _prevHighwayDisplay = canvas ? canvas.style.display : '';
+            // Snapshot/restore via `visibility` (not `display`): the host's
+            // rAF loop gates draw on `canvas.offsetParent !== null`, which is
+            // null whenever `display:none` is on the element or any ancestor.
+            // Hiding the host canvas via display:none therefore stops the
+            // host from ever calling our draw() and leaves the overlay
+            // permanently black. `visibility:hidden` keeps offsetParent live
+            // while still hiding the host's last-painted frame.
+            _prevHighwayDisplay = canvas ? canvas.style.visibility : '';
 
             _pianoCanvas = _createOverlayCanvas();
             if (!_pianoCanvas) {
@@ -1642,7 +1649,7 @@ function createFactory() {
                 return;
             }
 
-            if (_highwayCanvas) _highwayCanvas.style.display = 'none';
+            if (_highwayCanvas) _highwayCanvas.style.visibility = 'hidden';
 
             _injectSettingsGear();
             _applyCanvasDims();
