@@ -921,10 +921,17 @@ function createFactory() {
 
     function _applyCanvasDims() {
         if (!_pianoCanvas || !_pianoCtx) return;
-        // Prefer the splitscreen panel chrome as the source-of-truth
-        // rect when we're in splitscreen; otherwise measure #player.
+        // Size to the host highway canvas, not the full panel/#player.
+        // The panel chrome (splitscreen) and #player (main) both include
+        // a control bar at the bottom; sizing the overlay to those would
+        // push the keyboard (bottom 15% of canvas H) underneath the bar,
+        // which paints at z-index 10 over the overlay's z-index 5 and
+        // hides the lower keys. _highwayCanvas is flex:1 in both layouts,
+        // so its clientHeight is exactly the visible above-bar area.
+        // Fallbacks preserve existing behaviour if the highway canvas
+        // happens to be missing (paranoia — init bails earlier without it).
         const panelChrome = _ssPanelChrome(_highwayCanvas);
-        const srcRect = panelChrome || document.getElementById('player');
+        const srcRect = _highwayCanvas || panelChrome || document.getElementById('player');
         if (!srcRect) return;
         const w = srcRect.clientWidth;
         const h = srcRect.clientHeight;
