@@ -36,6 +36,7 @@
 
 const KEYS_PATTERNS = /\b(?:keys|piano|keyboard|synth)\b/i;
 const VISIBLE_SECONDS = 3.0;
+const RANGE_LERP_TAU = 0.12;    // seconds — exponential time-constant (~0.5s to 99% convergence)
 const NOW_LINE_Y_FRAC = 0.82;
 const KEYBOARD_H_FRAC = 0.15;
 const NOTE_LABEL_MIN_H = 16;
@@ -52,6 +53,9 @@ const STORE_KEYS = {
     showNoteNames: 'piano_note_names',
     hitDetection:  'piano_hit_detect',
     keyCount:      'piano_key_count',   // 0 = auto-detect from song
+    controllerLo:  'piano_ctrl_lo',     // lowest MIDI note the physical controller sends
+    octaveRemap:   'piano_oct_remap',   // whether dynamic octave remapping is active
+    practiceMode:  'piano_practice',    // true = full-song range locked; false = dynamic remap
 };
 
 // Standard keyboard sizes: key count → [loMidi, hiMidi] centered on middle C (60)
@@ -80,6 +84,9 @@ const _cfg = {
     showNoteNames: _readStore(STORE_KEYS.showNoteNames) !== 'false',
     hitDetection:  _readStore(STORE_KEYS.hitDetection) === 'true',
     keyCount:      parseInt(_readStore(STORE_KEYS.keyCount) || '0'),
+    controllerLo:  parseInt(_readStore(STORE_KEYS.controllerLo) || '48'), // default C3
+    octaveRemap:   _readStore(STORE_KEYS.octaveRemap) !== 'false',        // on by default
+    practiceMode:  _readStore(STORE_KEYS.practiceMode) === 'true',        // off by default
 };
 
 function _saveCfg(key, val) {
@@ -669,8 +676,16 @@ function createFactory() {
     const _wrongFlashes = [];
     const _missedNoteKeys = new Set();
 
-    // Display range cache
+    // Display range — interpolated toward a target for smooth transitions.
+    // _displayLoF/_displayHiF are the live float values (lerped each frame).
+    // _displayLo/_displayHi are their rounded integer counterparts used for
+    // layout building; they're only treated as "set" once the target is known.
     let _displayLo = null, _displayHi = null;
+    let _displayLoF = null, _displayHiF = null;   // float interpolated
+    let _targetLo = null, _targetHi = null;        // desired integer range
+    let _lastWallMs = null;                         // performance.now() at last draw
+    let _lastShiftSongT = -Infinity;               // song-time of last allowed shift
+    let _lastMeasureSongT = -Infinity;             // song-time of last observed measure beat
     let _cachedLayout = null, _lastLayoutW = 0;
     let _lastRangeLo = -1, _lastRangeHi = -1;
 
@@ -739,7 +754,16 @@ function createFactory() {
 
     function _handleNoteOn(rawMidi, velocity) {
         if (rawMidi < 0 || rawMidi > 127) return;
-        const played = rawMidi + _cfg.transpose;
+        // When a key count is selected, remap the physical controller range
+        // onto the current display range so pressing the lowest controller key
+        // triggers _displayLo, pressing the next triggers _displayLo+1, etc.
+        // Transpose is applied on top of the remapped pitch.
+        let played;
+        if (_cfg.keyCount > 0 && _cfg.octaveRemap && _displayLo !== null) {
+            played = _displayLo + (rawMidi - _cfg.controllerLo) + _cfg.transpose;
+        } else {
+            played = rawMidi + _cfg.transpose;
+        }
         if (played < 0 || played > 127) return;
         _rawToPlayed.set(rawMidi, played);
         _heldNotes.set(played, velocity);
@@ -885,6 +909,13 @@ function createFactory() {
         _lastRangeHi = -1;
         _displayLo = null;
         _displayHi = null;
+        _displayLoF = null;
+        _displayHiF = null;
+        _targetLo = null;
+        _targetHi = null;
+        _lastWallMs = null;
+        _lastShiftSongT = -Infinity;
+        _lastMeasureSongT = -Infinity;
         // Wave C: no _primeLatestSnapshot — we don't consult the
         // bare `window.highway` global anymore (it's the main-
         // player's highway, not ours under splitscreen). First
@@ -893,30 +924,84 @@ function createFactory() {
 
     // ── Display range update (per-instance) ──
 
-    function _updateDisplayRange(notes, chords, t) {
-        // Range is locked on first call and never changed mid-song —
-        // shifting the keyboard mid-playback causes jarring horizontal jumps.
-        if (_displayLo !== null) return;
-
-        // Manual key count overrides song-based detection.
+    // Compute the desired integer range for the current moment, respecting
+    // the mode, key-count override, section-boundary snapping, and hold-freeze.
+    // Returns {lo, hi} or null if the chart is empty.
+    function _computeTargetRange(notes, chords, t, beats) {
+        // Manual key count fixed range always wins over auto-detect.
         const fixed = _rangeForKeyCount(_cfg.keyCount);
-        if (fixed) {
-            _displayLo = fixed.lo;
-            _displayHi = fixed.hi;
-            return;
+        if (fixed) return fixed;
+
+        if (_cfg.practiceMode) {
+            // Practice: full song range, never shifts.
+            const full = detectRange(notes, chords);
+            return (full && full.lo <= full.hi) ? full : { lo: 48, hi: 95 };
         }
 
-        // Auto: derive range from the full song, then snap to octave
-        // boundaries and enforce a 47-semitone minimum span.
-        const full = detectRange(notes, chords);
-        if (full && full.lo <= full.hi) {
-            _displayLo = full.lo;
-            _displayHi = full.hi;
-        } else {
-            // 48 = C3, 95 = B6 — matches detectRange's empty-chart fallback.
-            _displayLo = 48;
-            _displayHi = 95;
+        // Performance: dynamic range from the notes currently visible on screen.
+        const raw = _visibleMidiRange(notes, chords, t);
+        if (!raw) return _targetLo !== null ? { lo: _targetLo, hi: _targetHi } : null;
+
+        let lo = Math.max(0, raw.lo - 2);
+        let hi = Math.min(127, raw.hi + 2);
+        lo = Math.floor(lo / 12) * 12;
+        hi = Math.ceil((hi + 1) / 12) * 12 - 1;
+        while (hi - lo < 47) {
+            if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
         }
+        return { lo, hi };
+    }
+
+    function _updateDisplayRange(notes, chords, t, beats, wallMs) {
+        // Track the latest measure beat we've passed (used for section snapping).
+        if (beats) {
+            for (const b of beats) {
+                if (b.measure > 0 && b.time > _lastMeasureSongT && b.time <= t) {
+                    _lastMeasureSongT = b.time;
+                }
+            }
+        }
+
+        const desired = _computeTargetRange(notes, chords, t, beats);
+        if (!desired) return;
+
+        const isFirstInit = _targetLo === null;
+
+        // In performance mode, only allow a target shift at section boundaries
+        // and while no note is physically held (freeze during held notes).
+        const wantShift = !isFirstInit && (desired.lo !== _targetLo || desired.hi !== _targetHi);
+        if (wantShift && !_cfg.practiceMode && !_rangeForKeyCount(_cfg.keyCount)) {
+            const atSectionBoundary = _lastMeasureSongT > _lastShiftSongT;
+            const heldFrozen = _heldNotes.size > 0;
+            if (!atSectionBoundary || heldFrozen) {
+                // Defer — keep current target, let interpolation finish.
+                desired.lo = _targetLo;
+                desired.hi = _targetHi;
+            } else {
+                _lastShiftSongT = _lastMeasureSongT;
+            }
+        }
+
+        _targetLo = desired.lo;
+        _targetHi = desired.hi;
+
+        // Initialise float accumulators on first call (no lerp, snap instantly).
+        if (_displayLoF === null) {
+            _displayLoF = _targetLo;
+            _displayHiF = _targetHi;
+            if (isFirstInit) _lastShiftSongT = _lastMeasureSongT;
+        } else {
+            // Exponential lerp toward target — frame-rate independent via wall-clock dt.
+            const dtWall = wallMs !== null && _lastWallMs !== null
+                ? Math.min((wallMs - _lastWallMs) / 1000, 0.1)
+                : 1 / 60;
+            const alpha = 1 - Math.exp(-dtWall / RANGE_LERP_TAU);
+            _displayLoF += (_targetLo - _displayLoF) * alpha;
+            _displayHiF += (_targetHi - _displayHiF) * alpha;
+        }
+
+        _displayLo = Math.round(_displayLoF);
+        _displayHi = Math.round(_displayHiF);
     }
 
     // Called when keyCount changes at runtime so the range re-locks
@@ -924,9 +1009,111 @@ function createFactory() {
     function _resetDisplayRange() {
         _displayLo = null;
         _displayHi = null;
+        _displayLoF = null;
+        _displayHiF = null;
+        _targetLo = null;
+        _targetHi = null;
         _lastRangeLo = -1;
         _lastRangeHi = -1;
+        _lastShiftSongT = -Infinity;
+        _lastMeasureSongT = -Infinity;
+        _lastWallMs = null;
         _cachedLayout = null;
+    }
+
+    // ── Range mismatch badge ──
+
+    // Returns how many unique MIDI pitches in the song fall outside the
+    // current keyboard range after accounting for the app transpose.
+    // Controllers can also shift octaves in hardware, so we show how many
+    // octave shifts would resolve the mismatch rather than treating it as
+    // a hard error.
+    function _checkRangeMismatch(notes, chords) {
+        if (_displayLo === null || _cfg.keyCount === 0) return null;
+
+        // With remapping on: the controller maps 1:1 onto [_displayLo, _displayHi],
+        // so every note in that window is reachable.
+        // With remapping off: the controller sends raw MIDI, so the reachable
+        // window is [controllerLo, controllerLo + keyCount - 1].
+        const tr = _cfg.transpose || 0;
+        let effLo, effHi;
+        if (_cfg.octaveRemap) {
+            effLo = _displayLo + tr;
+            effHi = _displayHi + tr;
+        } else {
+            effLo = _cfg.controllerLo + tr;
+            effHi = _cfg.controllerLo + _cfg.keyCount - 1 + tr;
+        }
+
+        let below = 0, above = 0;
+        const seen = new Set();
+        const scan = m => {
+            if (seen.has(m)) return;
+            seen.add(m);
+            if (m < effLo) below++;
+            else if (m > effHi) above++;
+        };
+        if (notes) for (const n of notes) scan(noteToMidi(n.s, n.f));
+        if (chords) for (const c of chords) for (const cn of (c.notes || [])) scan(noteToMidi(cn.s, cn.f));
+        if (!below && !above) return null;
+
+        // Suggest the octave shift of controllerLo that would best center
+        // the song's range within the display span.
+        const songRange = detectRange(notes, chords);
+        const span = _displayHi - _displayLo;
+        const center = Math.round((songRange.lo + songRange.hi) / 2);
+        const bestLo = center - Math.floor(span / 2);
+        const octaveShift = Math.round((bestLo - effLo) / 12);
+        return { below, above, octaveShift };
+    }
+
+    function _updateRangeBadge() {
+        if (!_settingsGear) return;
+        const mismatch = _checkRangeMismatch(_latestNotes, _latestChords);
+        let badge = _settingsGear.querySelector('.piano-range-badge');
+        if (!mismatch) {
+            if (badge) badge.remove();
+            return;
+        }
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'piano-range-badge';
+            badge.style.cssText = 'position:absolute;top:2px;right:2px;width:7px;height:7px;' +
+                'border-radius:50%;background:#f59e0b;pointer-events:none;';
+            _settingsGear.style.position = 'relative';
+            _settingsGear.appendChild(badge);
+        }
+        const parts = [];
+        if (mismatch.below) parts.push(`${mismatch.below} note${mismatch.below > 1 ? 's' : ''} below`);
+        if (mismatch.above) parts.push(`${mismatch.above} note${mismatch.above > 1 ? 's' : ''} above`);
+        const shiftHint = mismatch.octaveShift
+            ? ` · shift controller ${mismatch.octaveShift > 0 ? '+' : ''}${mismatch.octaveShift} oct to fit`
+            : '';
+        badge.title = `Song has ${parts.join(' & ')} keyboard range${shiftHint}`;
+        // Mirror the warning into the open settings panel if present
+        _updateRangeBadgeInPanel(mismatch);
+    }
+
+    function _updateRangeBadgeInPanel(mismatch) {
+        if (!_settingsPanel) return;
+        let warn = _settingsPanel.querySelector('.piano-range-warn');
+        if (!mismatch) {
+            if (warn) warn.remove();
+            return;
+        }
+        if (!warn) {
+            warn = document.createElement('div');
+            warn.className = 'piano-range-warn';
+            warn.style.cssText = 'margin-top:5px;font-size:10px;color:#f59e0b;';
+            _settingsPanel.appendChild(warn);
+        }
+        const parts = [];
+        if (mismatch.below) parts.push(`${mismatch.below} note${mismatch.below > 1 ? 's' : ''} below range`);
+        if (mismatch.above) parts.push(`${mismatch.above} note${mismatch.above > 1 ? 's' : ''} above range`);
+        const shiftHint = mismatch.octaveShift
+            ? ` — shift controller ${mismatch.octaveShift > 0 ? '+' : ''}${mismatch.octaveShift} octave${Math.abs(mismatch.octaveShift) > 1 ? 's' : ''} to fit`
+            : '';
+        warn.textContent = `⚠ ${parts.join(' & ')}${shiftHint}`;
     }
 
     // ── Canvas / overlay management ──
@@ -1136,6 +1323,28 @@ function createFactory() {
                         ).join('')}
                     </select>
                 </div>
+                <label class="piano-ctrl-lo-wrap" style="display:${_cfg.keyCount > 0 ? 'flex' : 'none'};align-items:center;gap:3px;font-size:11px;color:#999;cursor:pointer;">
+                    <input type="checkbox" class="piano-chk-remap" ${_cfg.octaveRemap ? 'checked' : ''}
+                        style="accent-color:#6366f1;"> Remap
+                </label>
+                <label class="piano-ctrl-lo-wrap" style="display:${_cfg.keyCount > 0 ? 'flex' : 'none'};align-items:center;gap:3px;font-size:11px;color:#999;cursor:pointer;">
+                    <input type="checkbox" class="piano-chk-practice" ${_cfg.practiceMode ? 'checked' : ''}
+                        style="accent-color:#22cc66;"> Practice
+                </label>
+                <div class="piano-ctrl-lo-wrap" style="display:${_cfg.keyCount > 0 ? 'flex' : 'none'};align-items:center;gap:4px;">
+                    <span style="font-size:10px;color:#666;">Lo key</span>
+                    <select class="piano-ctrl-lo-select" style="background:#1a1a2e;border:1px solid #333;border-radius:6px;
+                        padding:3px 6px;font-size:11px;color:#ccc;outline:none;">
+                        ${Array.from({length: 11}, (_, oct) => oct).flatMap(oct =>
+                            ['C','D','E','F','G','A','B'].map((note, i) => {
+                                const semis = [0,2,4,5,7,9,11];
+                                const midi = oct * 12 + semis[i];
+                                if (midi > 108) return '';
+                                return `<option value="${midi}"${_cfg.controllerLo === midi ? ' selected' : ''}>${note}${oct - 1}</option>`;
+                            })
+                        ).join('')}
+                    </select>
+                </div>
             </div>`;
 
         if (panelChrome) {
@@ -1186,6 +1395,20 @@ function createFactory() {
         panel.querySelector('.piano-key-count-select').onchange = function () {
             _saveCfg('keyCount', parseInt(this.value));
             _resetDisplayRange();
+            const show = _cfg.keyCount > 0 ? 'flex' : 'none';
+            for (const el of panel.querySelectorAll('.piano-ctrl-lo-wrap')) {
+                el.style.display = show;
+            }
+        };
+        panel.querySelector('.piano-chk-remap').onchange = function () {
+            _saveCfg('octaveRemap', this.checked);
+        };
+        panel.querySelector('.piano-chk-practice').onchange = function () {
+            _saveCfg('practiceMode', this.checked);
+            _resetDisplayRange();
+        };
+        panel.querySelector('.piano-ctrl-lo-select').onchange = function () {
+            _saveCfg('controllerLo', parseInt(this.value));
         };
     }
 
@@ -1221,7 +1444,10 @@ function createFactory() {
         // is in draw() above (gated on bundle.isReady), so by
         // the time we get here the chart is confirmed loaded
         // even if the per-frame note window is empty.
-        _updateDisplayRange(notes || [], chords || [], t);
+        const _nowWallMs = performance.now();
+        _updateDisplayRange(notes || [], chords || [], t, beats, _nowWallMs);
+        _lastWallMs = _nowWallMs;
+        _updateRangeBadge();
         if (_displayLo === null) {
             ctx.fillStyle = '#040408';
             ctx.fillRect(0, 0, W, H);
@@ -1283,6 +1509,8 @@ function createFactory() {
         ctx.stroke();
 
         _drawScrollingNotes(ctx, notes, chords, t, layout, noteAreaTop, nowLineY);
+        _drawOctaveShiftCues(ctx, notes, chords, t, noteAreaTop, nowLineY, W);
+        _drawControllerRangeOverlay(ctx, layout, kbTop, W);
         _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t);
 
         if (_cfg.hitDetection && (_hits + _misses) > 0) {
@@ -1399,6 +1627,150 @@ function createFactory() {
                 ctx.fillText(midiToNoteName(n.midi), barX + barW / 2, y1 + noteH / 2);
             }
         }
+    }
+
+    // Draws octave-shift cue labels on the left edge of the highway whenever
+    // upcoming notes require the player to move their controller to a different
+    // octave. Only active when a key count is selected; behavior differs based
+    // on whether remapping is on or off.
+    function _drawOctaveShiftCues(ctx, notes, chords, t, topY, nowLineY, W) {
+        if (_cfg.keyCount === 0 || _displayLo === null) return;
+
+        const span = _displayHi - _displayLo; // semitones the display covers
+
+        // For each upcoming note decide which octave shift (in 12-semitone steps)
+        // would be needed to bring it into the reachable window, then record the
+        // earliest time that shift is first required.
+        // shiftMap: octaveShift (integer) → earliest note time requiring it
+        const shiftMap = new Map();
+
+        const scan = (midi, time) => {
+            let shift;
+            if (_cfg.octaveRemap) {
+                // Remapping on: all display-range notes are reachable (shift = 0).
+                // Out-of-range notes need the display to shift, which isn't possible
+                // mid-song with a locked range — show how many octaves the song
+                // deviates so the player knows to skip / watch.
+                if (midi >= _displayLo && midi <= _displayHi) return;
+                shift = Math.round((midi - _displayLo) / 12);
+                if (shift === 0) shift = midi > _displayHi ? 1 : -1;
+            } else {
+                // Remapping off: reachable = [controllerLo, controllerLo + span].
+                const ctrlHi = _cfg.controllerLo + span;
+                if (midi >= _cfg.controllerLo && midi <= ctrlHi) return;
+                shift = Math.round((midi - _cfg.controllerLo) / 12);
+                if (shift === 0) shift = midi > ctrlHi ? 1 : -1;
+            }
+            if (!shiftMap.has(shift) || time < shiftMap.get(shift)) {
+                shiftMap.set(shift, time);
+            }
+        };
+
+        if (notes) {
+            for (const n of notes) {
+                const dt = n.t - t;
+                if (dt > VISIBLE_SECONDS) break;
+                if (dt < 0) continue;
+                scan(noteToMidi(n.s, n.f), n.t);
+            }
+        }
+        if (chords) {
+            for (const c of chords) {
+                const dt = c.t - t;
+                if (dt > VISIBLE_SECONDS) break;
+                if (dt < 0) continue;
+                for (const cn of (c.notes || [])) scan(noteToMidi(cn.s, cn.f), c.t);
+            }
+        }
+
+        if (shiftMap.size === 0) return;
+
+        ctx.save();
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textBaseline = 'middle';
+
+        for (const [shift, time] of shiftMap) {
+            const dt = time - t;
+            const y = _timeToY(dt, nowLineY, topY);
+
+            const label = shift > 0 ? `▲ +${shift} oct` : `▼ ${shift} oct`;
+            const isUrgent = dt < VISIBLE_SECONDS * 0.25;
+            const color = isUrgent ? '#f87171' : '#f59e0b';
+
+            // Pill background
+            const tw = ctx.measureText(label).width;
+            const ph = 16, pw = tw + 12, px = 6, py = y - ph / 2;
+            ctx.fillStyle = isUrgent ? 'rgba(248,113,113,0.18)' : 'rgba(245,158,11,0.15)';
+            _roundRect(ctx, px, py, pw, ph, 4);
+            ctx.fill();
+
+            // Border
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            _roundRect(ctx, px, py, pw, ph, 4);
+            ctx.stroke();
+
+            // Label text
+            ctx.fillStyle = color;
+            ctx.textAlign = 'left';
+            ctx.fillText(label, px + 6, y);
+        }
+
+        ctx.restore();
+    }
+
+    // Draws a translucent strip just above the keyboard showing the controller's
+    // currently-mapped physical span, with note-name labels at its edges so the
+    // player can orient themselves after a range shift.
+    function _drawControllerRangeOverlay(ctx, layout, kbTop, W) {
+        if (_cfg.keyCount === 0 || _displayLo === null) return;
+
+        // Determine the MIDI range the controller physically covers on the highway.
+        // With remapping on the controller maps exactly onto [_displayLo, _displayHi].
+        // With remapping off the controller sends [controllerLo, controllerLo + keyCount - 1]
+        // as raw MIDI, so those notes appear at their actual positions on the keyboard.
+        let mapLo, mapHi;
+        if (_cfg.octaveRemap) {
+            mapLo = _displayLo;
+            mapHi = _displayHi;
+        } else {
+            mapLo = _cfg.controllerLo;
+            mapHi = _cfg.controllerLo + _cfg.keyCount - 1;
+        }
+
+        // Find X extents from the layout for mapLo and mapHi.
+        const loKey = keyForMidi(mapLo, layout);
+        const hiKey = keyForMidi(mapHi, layout);
+        if (!loKey && !hiKey) return;
+
+        const x1 = loKey ? loKey.x : layout[0].x;
+        const hiK = hiKey || layout[layout.length - 1];
+        const x2 = hiK.x + hiK.w;
+
+        const stripH = 6;
+        const stripY = kbTop - stripH - 1;
+
+        // Filled bar
+        ctx.fillStyle = 'rgba(99,102,241,0.35)';
+        ctx.fillRect(x1, stripY, x2 - x1, stripH);
+
+        // Border
+        ctx.strokeStyle = 'rgba(99,102,241,0.8)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x1 + 0.5, stripY + 0.5, x2 - x1 - 1, stripH - 1);
+
+        // Edge labels (lowest and highest mapped note names)
+        ctx.font = 'bold 9px sans-serif';
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = 'rgba(180,180,255,0.9)';
+
+        const loLabel = midiToNoteName(mapLo);
+        const hiLabel = midiToNoteName(mapHi);
+
+        ctx.textAlign = 'left';
+        ctx.fillText(loLabel, x1 + 2, stripY);
+        ctx.textAlign = 'right';
+        ctx.fillText(hiLabel, x2 - 2, stripY);
     }
 
     function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
