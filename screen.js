@@ -59,16 +59,14 @@ const STORE_KEYS = {
 };
 
 // Standard keyboard sizes: key count → [loMidi, hiMidi] centered on middle C (60)
-const KEY_COUNT_RANGES = {
-    32:  [43,  84],   // ??–C6
-    49:  [36,  84],   // C2–C6
-    61:  [36,  96],   // C2–C7
-    88:  [21,  108],  // A0–C8
-};
+const VALID_KEY_COUNTS = new Set([32, 49, 61, 88]);
 
+// Range is anchored to controllerLo so the display matches the physical keyboard.
+// The Lo key setting IS the left edge of what gets shown.
 function _rangeForKeyCount(n) {
-    const r = KEY_COUNT_RANGES[n];
-    return r ? { lo: r[0], hi: r[1] } : null;
+    if (!VALID_KEY_COUNTS.has(n)) return null;
+    const lo = _cfg.controllerLo;
+    return { lo, hi: Math.min(127, lo + n - 1) };
 }
 
 function _readStore(key) {
@@ -1409,6 +1407,7 @@ function createFactory() {
         };
         panel.querySelector('.piano-ctrl-lo-select').onchange = function () {
             _saveCfg('controllerLo', parseInt(this.value));
+            _resetDisplayRange();
         };
     }
 
