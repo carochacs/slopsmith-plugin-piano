@@ -1131,7 +1131,7 @@ function createFactory() {
                     <select class="piano-key-count-select" style="background:#1a1a2e;border:1px solid #333;border-radius:6px;
                         padding:3px 6px;font-size:11px;color:#ccc;outline:none;">
                         <option value="0"${_cfg.keyCount === 0 ? ' selected' : ''}>Auto</option>
-                        ${[25, 37, 49, 61, 76, 88].map(n =>
+                        ${[32, 49, 61, 88].map(n =>
                             `<option value="${n}"${_cfg.keyCount === n ? ' selected' : ''}>${n}</option>`
                         ).join('')}
                     </select>
