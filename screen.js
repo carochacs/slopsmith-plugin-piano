@@ -51,7 +51,23 @@ const STORE_KEYS = {
     transpose:     'piano_transpose',
     showNoteNames: 'piano_note_names',
     hitDetection:  'piano_hit_detect',
+    keyCount:      'piano_key_count',   // 0 = auto-detect from song
 };
+
+// Standard keyboard sizes: key count → [loMidi, hiMidi] centered on middle C (60)
+const KEY_COUNT_RANGES = {
+    25:  [48,  72],   // C3–C5
+    37:  [48,  84],   // C3–C6
+    49:  [36,  84],   // C2–C6
+    61:  [36,  96],   // C2–C7
+    76:  [28,  103],  // E1–G7
+    88:  [21,  108],  // A0–C8
+};
+
+function _rangeForKeyCount(n) {
+    const r = KEY_COUNT_RANGES[n];
+    return r ? { lo: r[0], hi: r[1] } : null;
+}
 
 function _readStore(key) {
     try { return localStorage.getItem(key); } catch (_) { return null; }
@@ -65,6 +81,7 @@ const _cfg = {
     transpose:     parseInt(_readStore(STORE_KEYS.transpose) || '0'),
     showNoteNames: _readStore(STORE_KEYS.showNoteNames) !== 'false',
     hitDetection:  _readStore(STORE_KEYS.hitDetection) === 'true',
+    keyCount:      parseInt(_readStore(STORE_KEYS.keyCount) || '0'),
 };
 
 function _saveCfg(key, val) {
@@ -879,42 +896,39 @@ function createFactory() {
     // ── Display range update (per-instance) ──
 
     function _updateDisplayRange(notes, chords, t) {
-        const raw = _visibleMidiRange(notes, chords, t);
-        if (!raw) {
-            if (_displayLo !== null) return;
-            const full = detectRange(notes, chords);
-            if (full && full.lo <= full.hi) {
-                _displayLo = full.lo;
-                _displayHi = full.hi;
-            } else {
-                // 48 = C3, 95 = B6 — matches detectRange's
-                // empty-chart fallback after octave-boundary
-                // rounding + the 47-semitone-minimum-span while
-                // loop. Keeping these in lockstep means the two
-                // fallback paths produce the same visible
-                // keyboard span.
-                _displayLo = 48;
-                _displayHi = 95;
-            }
+        // Range is locked on first call and never changed mid-song —
+        // shifting the keyboard mid-playback causes jarring horizontal jumps.
+        if (_displayLo !== null) return;
+
+        // Manual key count overrides song-based detection.
+        const fixed = _rangeForKeyCount(_cfg.keyCount);
+        if (fixed) {
+            _displayLo = fixed.lo;
+            _displayHi = fixed.hi;
             return;
         }
 
-        if (_displayLo !== null && raw.lo >= _displayLo && raw.hi <= _displayHi) {
-            const loSlack = raw.lo - _displayLo;
-            const hiSlack = _displayHi - raw.hi;
-            if (loSlack < 12 && hiSlack < 12) return;
+        // Auto: derive range from the full song, then snap to octave
+        // boundaries and enforce a 47-semitone minimum span.
+        const full = detectRange(notes, chords);
+        if (full && full.lo <= full.hi) {
+            _displayLo = full.lo;
+            _displayHi = full.hi;
+        } else {
+            // 48 = C3, 95 = B6 — matches detectRange's empty-chart fallback.
+            _displayLo = 48;
+            _displayHi = 95;
         }
+    }
 
-        let lo = Math.max(0, raw.lo - 2);
-        let hi = Math.min(127, raw.hi + 2);
-        lo = Math.floor(lo / 12) * 12;
-        hi = Math.ceil((hi + 1) / 12) * 12 - 1;
-        while (hi - lo < 47) {
-            if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
-        }
-
-        _displayLo = lo;
-        _displayHi = hi;
+    // Called when keyCount changes at runtime so the range re-locks
+    // immediately on the next draw rather than waiting for a song reload.
+    function _resetDisplayRange() {
+        _displayLo = null;
+        _displayHi = null;
+        _lastRangeLo = -1;
+        _lastRangeHi = -1;
+        _cachedLayout = null;
     }
 
     // ── Canvas / overlay management ──
@@ -1114,6 +1128,16 @@ function createFactory() {
                     <input type="checkbox" class="piano-chk-hits" ${_cfg.hitDetection ? 'checked' : ''}
                         style="accent-color:#22cc66;"> Hits
                 </label>
+                <div style="display:flex;align-items:center;gap:4px;">
+                    <span style="font-size:10px;color:#666;">Keys</span>
+                    <select class="piano-key-count-select" style="background:#1a1a2e;border:1px solid #333;border-radius:6px;
+                        padding:3px 6px;font-size:11px;color:#ccc;outline:none;">
+                        <option value="0"${_cfg.keyCount === 0 ? ' selected' : ''}>Auto</option>
+                        ${[25, 37, 49, 61, 76, 88].map(n =>
+                            `<option value="${n}"${_cfg.keyCount === n ? ' selected' : ''}>${n}</option>`
+                        ).join('')}
+                    </select>
+                </div>
             </div>`;
 
         if (panelChrome) {
@@ -1160,6 +1184,10 @@ function createFactory() {
         panel.querySelector('.piano-chk-hits').onchange = function () {
             _saveCfg('hitDetection', this.checked);
             if (this.checked) _resetScoring();
+        };
+        panel.querySelector('.piano-key-count-select').onchange = function () {
+            _saveCfg('keyCount', parseInt(this.value));
+            _resetDisplayRange();
         };
     }
 
