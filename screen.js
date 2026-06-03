@@ -1004,32 +1004,36 @@ function createFactory() {
     // the mode, key-count override, section-boundary snapping, and hold-freeze.
     // Returns {lo, hi} or null if the chart is empty.
     function _computeTargetRange(notes, chords, t, beats) {
+        // When key count is set, display is always anchored to controllerLo so the
+        // visual keyboard matches the physical one exactly. _midiOffset handles the
+        // song→display note remapping separately.
+        if (VALID_KEY_COUNTS.has(_cfg.keyCount)) {
+            return _rangeForKeyCount(_cfg.keyCount);
+        }
+
         if (_cfg.practiceMode) {
             // Practice: full song range, never shifts.
             const full = detectRange(notes, chords);
             return (full && full.lo <= full.hi) ? full : { lo: 48, hi: 95 };
         }
 
-        // Performance: dynamic range from the notes currently visible on screen.
+        // Performance auto-range: use notes currently visible on screen.
         const raw = _visibleMidiRange(notes, chords, t);
-        if (!raw) return _targetLo !== null ? { lo: _targetLo, hi: _targetHi } : null;
+        if (!raw) {
+            // During rests or before first notes, hold the current target.
+            // On the very first frame fall back to the full song range so the
+            // screen never shows black just because no notes are visible yet.
+            if (_targetLo !== null) return { lo: _targetLo, hi: _targetHi };
+            const full = detectRange(notes, chords);
+            return (full && full.lo <= full.hi) ? full : { lo: 48, hi: 95 };
+        }
 
         let lo = Math.max(0, raw.lo - 2);
         let hi = Math.min(127, raw.hi + 2);
         lo = Math.floor(lo / 12) * 12;
         hi = Math.ceil((hi + 1) / 12) * 12 - 1;
-
-        // When a key count is selected, enforce exactly that span (centred on the
-        // song notes) rather than the default 47-semitone minimum.
-        if (VALID_KEY_COUNTS.has(_cfg.keyCount)) {
-            const span = _cfg.keyCount - 1;
-            const centre = Math.round((raw.lo + raw.hi) / 2);
-            lo = Math.max(0, centre - Math.floor(span / 2));
-            hi = Math.min(127, lo + span);
-        } else {
-            while (hi - lo < 47) {
-                if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
-            }
+        while (hi - lo < 47) {
+            if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
         }
         return { lo, hi };
     }
