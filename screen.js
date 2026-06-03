@@ -56,11 +56,9 @@ const STORE_KEYS = {
 
 // Standard keyboard sizes: key count → [loMidi, hiMidi] centered on middle C (60)
 const KEY_COUNT_RANGES = {
-    25:  [48,  72],   // C3–C5
-    37:  [48,  84],   // C3–C6
+    32:  [43,  84],   // ??–C6
     49:  [36,  84],   // C2–C6
     61:  [36,  96],   // C2–C7
-    76:  [28,  103],  // E1–G7
     88:  [21,  108],  // A0–C8
 };
 
