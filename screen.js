@@ -1173,7 +1173,7 @@ function createFactory() {
 
     // ── Drawing ──
 
-    function _draw(notes, chords, t, beats) {
+    function _draw(notes, chords, t, beats, templates) {
         if (!_pianoCanvas || !_pianoCtx) return;
 
         _latestNotes = notes;
@@ -1256,7 +1256,7 @@ function createFactory() {
         ctx.lineTo(W - padR, nowLineY);
         ctx.stroke();
 
-        _drawScrollingNotes(ctx, notes, chords, t, layout, noteAreaTop, nowLineY);
+        _drawScrollingNotes(ctx, notes, chords, t, layout, noteAreaTop, nowLineY, templates);
         _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t);
 
         if (_cfg.hitDetection && (_hits + _misses) > 0) {
@@ -1278,7 +1278,7 @@ function createFactory() {
         }
     }
 
-    function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
+    function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY, templates) {
         const allNotes = [];
 
         if (notes) {
@@ -1371,6 +1371,59 @@ function createFactory() {
                 ctx.fillText(midiToNoteName(n.midi), barX + barW / 2 + 0.5, y1 + noteH / 2 + 0.5);
                 ctx.fillStyle = '#fff';
                 ctx.fillText(midiToNoteName(n.midi), barX + barW / 2, y1 + noteH / 2);
+            }
+        }
+
+        // Chord-name floating labels — drawn after all bars so they sit on top.
+        // Only when showNoteNames is on and templates are available.
+        if (_cfg.showNoteNames && chords && templates) {
+            const activeChordLabels = [];
+            for (const c of chords) {
+                const dt = c.t - t;
+                if (dt > VISIBLE_SECONDS + 1) break;
+                if (dt < -1) continue;
+
+                const tmpl = c.tmpl != null ? templates[c.tmpl] : null;
+                const chordName = tmpl && tmpl.name ? tmpl.name : null;
+                if (!chordName) continue;
+
+                // Determine if any note in this chord is crossing the now-line.
+                let isActive = false;
+                let leftmostMidi = Infinity;
+                for (const cn of (c.notes || [])) {
+                    const dtEnd = (c.t + (cn.sus || 0)) - t;
+                    if (dt <= 0.05 && dtEnd >= -0.05) isActive = true;
+                    const m = noteToMidi(cn.s, cn.f);
+                    if (m < leftmostMidi) leftmostMidi = m;
+                }
+                if (!isActive || leftmostMidi === Infinity) continue;
+
+                const leftKey = keyForMidi(leftmostMidi, layout);
+                if (!leftKey) continue;
+
+                activeChordLabels.push({ name: chordName, x: leftKey.x + leftKey.w / 2 });
+            }
+
+            const labelFontSize = 11;
+            const labelPadX = 5;
+            const labelPadY = 3;
+            const labelH = labelFontSize + labelPadY * 2;
+            const labelY = nowLineY - 8 - labelH;  // just above the now-line
+
+            ctx.font = `bold ${labelFontSize}px sans-serif`;
+            for (const label of activeChordLabels) {
+                const tw = ctx.measureText(label.name).width;
+                const lx = label.x - tw / 2 - labelPadX;
+                const lw = tw + labelPadX * 2;
+
+                ctx.fillStyle = 'rgba(10,10,28,0.82)';
+                _roundRect(ctx, lx, labelY, lw, labelH, 4);
+                ctx.fill();
+
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(label.name, label.x, labelY + labelH / 2);
             }
         }
     }
@@ -1773,7 +1826,7 @@ function createFactory() {
                 return;
             }
 
-            _draw(bundle.notes, bundle.chords, bundle.currentTime, bundle.beats);
+            _draw(bundle.notes, bundle.chords, bundle.currentTime, bundle.beats, bundle.templates);
         },
         resize(/* w, h */) {
             if (!_isReady) return;
