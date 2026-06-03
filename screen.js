@@ -1131,10 +1131,13 @@ function createFactory() {
         // window is [controllerLo, controllerLo + keyCount - 1].
         const tr = _cfg.transpose || 0;
         let effLo, effHi;
-        if (_cfg.octaveRemap) {
-            effLo = _displayLo + tr;
-            effHi = _displayHi + tr;
+        if (_cfg.octaveRemap && _songMapLo !== null) {
+            // Remapping on: pressing controllerLo plays _songMapLo, so the reachable
+            // window in song space is [_songMapLo, _songMapLo + keyCount - 1].
+            effLo = _songMapLo + tr;
+            effHi = _songMapLo + _cfg.keyCount - 1 + tr;
         } else {
+            // Remapping off: controller sends raw MIDI pitched at [controllerLo, ...].
             effLo = _cfg.controllerLo + tr;
             effHi = _cfg.controllerLo + _cfg.keyCount - 1 + tr;
         }
