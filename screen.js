@@ -61,12 +61,13 @@ const STORE_KEYS = {
 // Standard keyboard sizes: key count → [loMidi, hiMidi] centered on middle C (60)
 const VALID_KEY_COUNTS = new Set([32, 49, 61, 88]);
 
-// Range is anchored to controllerLo so the display matches the physical keyboard.
-// The Lo key setting IS the left edge of what gets shown.
 function _rangeForKeyCount(n) {
     if (!VALID_KEY_COUNTS.has(n)) return null;
-    const lo = _cfg.controllerLo;
-    return { lo, hi: Math.min(127, lo + n - 1) };
+    // Display range is always derived from the song (detectRange / visibleMidiRange).
+    // controllerLo is the physical anchor used for remapping MIDI input, not for
+    // constraining what's shown. Returning null here lets _computeTargetRange fall
+    // through to the song-based path while still honouring the key-count span.
+    return null;
 }
 
 function _readStore(key) {
@@ -926,10 +927,6 @@ function createFactory() {
     // the mode, key-count override, section-boundary snapping, and hold-freeze.
     // Returns {lo, hi} or null if the chart is empty.
     function _computeTargetRange(notes, chords, t, beats) {
-        // Manual key count fixed range always wins over auto-detect.
-        const fixed = _rangeForKeyCount(_cfg.keyCount);
-        if (fixed) return fixed;
-
         if (_cfg.practiceMode) {
             // Practice: full song range, never shifts.
             const full = detectRange(notes, chords);
@@ -944,8 +941,18 @@ function createFactory() {
         let hi = Math.min(127, raw.hi + 2);
         lo = Math.floor(lo / 12) * 12;
         hi = Math.ceil((hi + 1) / 12) * 12 - 1;
-        while (hi - lo < 47) {
-            if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
+
+        // When a key count is selected, enforce exactly that span (centred on the
+        // song notes) rather than the default 47-semitone minimum.
+        if (VALID_KEY_COUNTS.has(_cfg.keyCount)) {
+            const span = _cfg.keyCount - 1;
+            const centre = Math.round((raw.lo + raw.hi) / 2);
+            lo = Math.max(0, centre - Math.floor(span / 2));
+            hi = Math.min(127, lo + span);
+        } else {
+            while (hi - lo < 47) {
+                if (lo > 0) lo -= 12; else hi = Math.min(127, hi + 12);
+            }
         }
         return { lo, hi };
     }
@@ -1724,18 +1731,10 @@ function createFactory() {
     function _drawControllerRangeOverlay(ctx, layout, kbTop, W) {
         if (_cfg.keyCount === 0 || _displayLo === null) return;
 
-        // Determine the MIDI range the controller physically covers on the highway.
-        // With remapping on the controller maps exactly onto [_displayLo, _displayHi].
-        // With remapping off the controller sends [controllerLo, controllerLo + keyCount - 1]
-        // as raw MIDI, so those notes appear at their actual positions on the keyboard.
-        let mapLo, mapHi;
-        if (_cfg.octaveRemap) {
-            mapLo = _displayLo;
-            mapHi = _displayHi;
-        } else {
-            mapLo = _cfg.controllerLo;
-            mapHi = _cfg.controllerLo + _cfg.keyCount - 1;
-        }
+        // Always show the physical controller span — controllerLo is the left edge
+        // the player sees on their device regardless of remap mode.
+        const mapLo = _cfg.controllerLo;
+        const mapHi = _cfg.controllerLo + _cfg.keyCount - 1;
 
         // Find X extents from the layout for mapLo and mapHi.
         const loKey = keyForMidi(mapLo, layout);
