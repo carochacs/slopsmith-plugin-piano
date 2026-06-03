@@ -63,11 +63,80 @@ const VALID_KEY_COUNTS = new Set([32, 49, 61, 88]);
 
 function _rangeForKeyCount(n) {
     if (!VALID_KEY_COUNTS.has(n)) return null;
-    // Display range is always derived from the song (detectRange / visibleMidiRange).
-    // controllerLo is the physical anchor used for remapping MIDI input, not for
-    // constraining what's shown. Returning null here lets _computeTargetRange fall
-    // through to the song-based path while still honouring the key-count span.
-    return null;
+    // Display is anchored to controllerLo so the visual keyboard matches the
+    // physical one exactly. _songMapLo (computed separately) tracks which song
+    // note maps to the left edge, keeping the remap formula correct.
+    return { lo: _cfg.controllerLo, hi: Math.min(127, _cfg.controllerLo + n - 1) };
+}
+
+// Returns the song MIDI note that should map to the controller's lowest key,
+// choosing the placement that best fits the song within the controller's span.
+//
+// If the entire song fits within the key count, centre it (zero shifts needed
+// regardless of exact placement, centering feels natural).
+//
+// If the song is wider than the controller, scan all candidate placements and
+// pick the one that produces the fewest shift-change transitions during playback
+// — i.e., where consecutive notes stay in the same octave-shift zone for the
+// longest uninterrupted stretches.
+function _bestSongMapLo(notes, chords, keyCount) {
+    const songRange = detectRange(notes, chords);
+    if (!songRange || songRange.lo > songRange.hi) return _cfg.controllerLo;
+
+    const span = keyCount - 1;
+    const songSpan = songRange.hi - songRange.lo;
+
+    // Only octave-aligned placements are valid: a C key always sends C,
+    // so _songMapLo must share the same pitch class as controllerLo.
+    // Generate every candidate lo ≡ controllerLo (mod 12) in [0, 127].
+    const pitchClass = _cfg.controllerLo % 12;
+    // Nearest lo at or below songRange.lo with the right pitch class.
+    const firstLo = songRange.lo - ((songRange.lo - pitchClass + 1200) % 12);
+
+    if (songSpan <= span) {
+        // Entire song fits — pick the octave-aligned placement that centres it best.
+        const idealLo = songRange.lo - Math.floor((span - songSpan) / 2);
+        // Snap to nearest valid candidate (round down, then check round up too).
+        const snapDown = idealLo - ((idealLo - pitchClass + 1200) % 12);
+        const snapUp   = snapDown + 12;
+        const lo = (Math.abs(snapUp - idealLo) < Math.abs(snapDown - idealLo) && snapUp >= 0)
+            ? snapUp : snapDown;
+        return Math.max(0, lo);
+    }
+
+    // Song is wider than the controller. Collect notes in time order.
+    const seq = [];
+    if (notes)  for (const n of notes)  seq.push({ t: n.t, m: noteToMidi(n.s, n.f) });
+    if (chords) for (const c of chords) for (const cn of (c.notes || [])) seq.push({ t: c.t, m: noteToMidi(cn.s, cn.f) });
+    seq.sort((a, b) => a.t - b.t);
+    if (seq.length === 0) return Math.max(0, firstLo);
+
+    // Only iterate octave-aligned candidates within the meaningful window:
+    // [songRange.lo, songRange.hi - span] keeps at least one song boundary
+    // at the controller edge. Step by 12 (one octave) not by semitone.
+    const loMax = Math.max(firstLo, songRange.hi - span);
+
+    let bestLo = firstLo, bestTransitions = Infinity;
+
+    for (let lo = firstLo; lo <= loMax; lo += 12) {
+        if (lo < 0) continue;
+        const hi = lo + span;
+        let transitions = 0;
+        let prevShift = null;
+        for (const { m } of seq) {
+            const shift = m < lo ? -Math.ceil((lo - m) / 12)
+                        : m > hi ?  Math.ceil((m - hi) / 12)
+                        : 0;
+            if (prevShift !== null && shift !== prevShift) transitions++;
+            prevShift = shift;
+        }
+        if (transitions < bestTransitions) {
+            bestTransitions = transitions;
+            bestLo = lo;
+        }
+    }
+
+    return bestLo;
 }
 
 function _readStore(key) {
@@ -549,14 +618,16 @@ function _visibleMidiRange(notes, chords, t) {
     return lo <= hi ? { lo, hi } : null;
 }
 
-function _approachAlpha(midi, notes, chords, t) {
+// midi is in display space; midiOffset converts it back to song space for lookup.
+function _approachAlpha(midi, notes, chords, t, midiOffset) {
+    const songMidi = midi - (midiOffset || 0);
     const lookAhead = VISIBLE_SECONDS * 0.6;
     let closest = Infinity;
     if (notes) {
         for (const n of notes) {
             if (n.t < t - 0.05) continue;
             if (n.t > t + lookAhead) break;
-            if (noteToMidi(n.s, n.f) === midi) {
+            if (noteToMidi(n.s, n.f) === songMidi) {
                 closest = Math.min(closest, n.t - t);
             }
         }
@@ -566,7 +637,7 @@ function _approachAlpha(midi, notes, chords, t) {
             if (c.t < t - 0.05) continue;
             if (c.t > t + lookAhead) break;
             for (const cn of (c.notes || [])) {
-                if (noteToMidi(cn.s, cn.f) === midi) {
+                if (noteToMidi(cn.s, cn.f) === songMidi) {
                     closest = Math.min(closest, c.t - t);
                 }
             }
@@ -685,6 +756,10 @@ function createFactory() {
     let _lastWallMs = null;                         // performance.now() at last draw
     let _lastShiftSongT = -Infinity;               // song-time of last allowed shift
     let _lastMeasureSongT = -Infinity;             // song-time of last observed measure beat
+    // When key count is set, _songMapLo is the song note that maps to controllerLo.
+    // _midiOffset = controllerLo - _songMapLo shifts song-space midis into display space.
+    let _songMapLo = null;
+    let _midiOffset = 0;
     let _cachedLayout = null, _lastLayoutW = 0;
     let _lastRangeLo = -1, _lastRangeHi = -1;
 
@@ -758,8 +833,8 @@ function createFactory() {
         // triggers _displayLo, pressing the next triggers _displayLo+1, etc.
         // Transpose is applied on top of the remapped pitch.
         let played;
-        if (_cfg.keyCount > 0 && _cfg.octaveRemap && _displayLo !== null) {
-            played = _displayLo + (rawMidi - _cfg.controllerLo) + _cfg.transpose;
+        if (_cfg.keyCount > 0 && _cfg.octaveRemap && _songMapLo !== null) {
+            played = _songMapLo + (rawMidi - _cfg.controllerLo) + _cfg.transpose;
         } else {
             played = rawMidi + _cfg.transpose;
         }
@@ -915,6 +990,8 @@ function createFactory() {
         _lastWallMs = null;
         _lastShiftSongT = -Infinity;
         _lastMeasureSongT = -Infinity;
+        _songMapLo = null;
+        _midiOffset = 0;
         // Wave C: no _primeLatestSnapshot — we don't consult the
         // bare `window.highway` global anymore (it's the main-
         // player's highway, not ours under splitscreen). First
@@ -1007,6 +1084,12 @@ function createFactory() {
 
         _displayLo = Math.round(_displayLoF);
         _displayHi = Math.round(_displayHiF);
+
+        if (VALID_KEY_COUNTS.has(_cfg.keyCount) && _songMapLo === null) {
+            _songMapLo = _bestSongMapLo(notes, chords, _cfg.keyCount);
+        }
+        if (!VALID_KEY_COUNTS.has(_cfg.keyCount)) _songMapLo = null;
+        _midiOffset = (_songMapLo !== null) ? (_cfg.controllerLo - _songMapLo) : 0;
     }
 
     // Called when keyCount changes at runtime so the range re-locks
@@ -1023,6 +1106,8 @@ function createFactory() {
         _lastShiftSongT = -Infinity;
         _lastMeasureSongT = -Infinity;
         _lastWallMs = null;
+        _songMapLo = null;
+        _midiOffset = 0;
         _cachedLayout = null;
     }
 
@@ -1546,7 +1631,7 @@ function createFactory() {
                 const dt = n.t - t;
                 if (dt > VISIBLE_SECONDS + 1) break;
                 if (dt < -1 && (n.t + (n.sus || 0)) < t - 0.5) continue;
-                allNotes.push({ midi: noteToMidi(n.s, n.f), t: n.t, sus: n.sus || 0, accent: n.ac });
+                allNotes.push({ midi: noteToMidi(n.s, n.f) + _midiOffset, t: n.t, sus: n.sus || 0, accent: n.ac });
             }
         }
         if (chords) {
@@ -1555,7 +1640,7 @@ function createFactory() {
                 if (dt > VISIBLE_SECONDS + 1) break;
                 if (dt < -1) continue;
                 for (const cn of (c.notes || [])) {
-                    allNotes.push({ midi: noteToMidi(cn.s, cn.f), t: c.t, sus: cn.sus || 0, accent: cn.ac });
+                    allNotes.push({ midi: noteToMidi(cn.s, cn.f) + _midiOffset, t: c.t, sus: cn.sus || 0, accent: cn.ac });
                 }
             }
         }
@@ -1762,8 +1847,11 @@ function createFactory() {
         ctx.textBaseline = 'bottom';
         ctx.fillStyle = 'rgba(180,180,255,0.9)';
 
-        const loLabel = midiToNoteName(mapLo);
-        const hiLabel = midiToNoteName(mapHi);
+        // Show physical note → mapped song note so the player can orient themselves.
+        const songLo = _songMapLo !== null ? midiToNoteName(_songMapLo) : midiToNoteName(mapLo);
+        const songHi = _songMapLo !== null ? midiToNoteName(_songMapLo + (mapHi - mapLo)) : midiToNoteName(mapHi);
+        const loLabel = _midiOffset !== 0 ? `${midiToNoteName(mapLo)}→${songLo}` : midiToNoteName(mapLo);
+        const hiLabel = _midiOffset !== 0 ? `${midiToNoteName(mapHi)}→${songHi}` : midiToNoteName(mapHi);
 
         ctx.textAlign = 'left';
         ctx.fillText(loLabel, x1 + 2, stripY);
@@ -1780,7 +1868,7 @@ function createFactory() {
                 const end = n.t + (n.sus || 0);
                 if (end < t - window_) continue;
                 if (n.t <= t + window_ && end >= t - window_)
-                    songActiveSet.add(noteToMidi(n.s, n.f));
+                    songActiveSet.add(noteToMidi(n.s, n.f) + _midiOffset);
             }
         }
         if (chords) {
@@ -1790,7 +1878,7 @@ function createFactory() {
                 for (const cn of (c.notes || [])) {
                     const end = c.t + (cn.sus || 0);
                     if (c.t <= t + window_ && end >= t - window_)
-                        songActiveSet.add(noteToMidi(cn.s, cn.f));
+                        songActiveSet.add(noteToMidi(cn.s, cn.f) + _midiOffset);
                 }
             }
         }
@@ -1827,7 +1915,7 @@ function createFactory() {
             } else if (songActive) {
                 fr = nr; fg = ng; fb = nb;
             } else {
-                const ap = _approachAlpha(k.midi, notes, chords, t);
+                const ap = _approachAlpha(k.midi, notes, chords, t, _midiOffset);
                 if (ap > 0) {
                     fr += (nr - fr) * ap * 0.6;
                     fg += (ng - fg) * ap * 0.6;
@@ -1849,7 +1937,7 @@ function createFactory() {
             ctx.stroke();
 
             if (!pressed) {
-                const ap = _approachAlpha(k.midi, notes, chords, t);
+                const ap = _approachAlpha(k.midi, notes, chords, t, _midiOffset);
                 if (ap > 0.15) {
                     const ba = Math.min((ap - 0.15) * 1.5, 1);
                     ctx.strokeStyle = _rgbStr(nr, ng, nb, ba * 0.6);
@@ -1900,7 +1988,7 @@ function createFactory() {
             } else if (songActive) {
                 fr = nr * 0.8; fg = ng * 0.8; fb = nb * 0.8;
             } else {
-                const ap = _approachAlpha(k.midi, notes, chords, t);
+                const ap = _approachAlpha(k.midi, notes, chords, t, _midiOffset);
                 if (ap > 0) {
                     fr += (nr * 0.7 - fr) * ap * 0.6;
                     fg += (ng * 0.7 - fg) * ap * 0.6;
@@ -1922,7 +2010,7 @@ function createFactory() {
             ctx.stroke();
 
             if (!pressed) {
-                const ap = _approachAlpha(k.midi, notes, chords, t);
+                const ap = _approachAlpha(k.midi, notes, chords, t, _midiOffset);
                 if (ap > 0.15) {
                     const ba = Math.min((ap - 0.15) * 1.5, 1);
                     ctx.strokeStyle = _rgbStr(nr, ng, nb, ba * 0.5);
