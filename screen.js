@@ -1261,7 +1261,7 @@ function createFactory() {
             // style and nudge them above z-index 5.
             const controls = document.getElementById('player-controls');
             if (controls) {
-                mount.insertBefore(canvas, controls);
+                (controls.parentNode || mount).insertBefore(canvas, controls);
                 _prevControlsPosition = controls.style.position;
                 _prevControlsZIndex = controls.style.zIndex;
                 _controlsStyleTouched = true;
@@ -1448,7 +1448,7 @@ function createFactory() {
             panelChrome.appendChild(panel);
         } else {
             const controls = document.getElementById('player-controls');
-            if (controls) mount.insertBefore(panel, controls);
+            if (controls) (controls.parentNode || mount).insertBefore(panel, controls);
             else mount.appendChild(panel);
         }
         _settingsPanel = panel;
