@@ -231,6 +231,23 @@ async function _synthLoadInstrument(idx) {
     _synthLoading = false;
 }
 
+async function _synthLoadInstrumentGM(gm) {
+    if (!_synthPlayer || !_audioCtx) return;
+    _synthLoading = true;
+    const varName = _wafVar(gm);
+    try {
+        if (!window[varName]) await _loadScript(_wafUrl(gm));
+        const preset = window[varName];
+        if (preset) {
+            _synthPlayer.adjustPreset(_audioCtx, preset);
+            _synthPreset = preset;
+        }
+    } catch (e) {
+        console.warn('[Piano] Failed to load GM program', gm, e);
+    }
+    _synthLoading = false;
+}
+
 function _synthEnsureCtx() {
     if (_audioCtx && _audioCtx.state === 'suspended') {
         _audioCtx.resume();
@@ -664,6 +681,10 @@ function createFactory() {
     // the user sees.
     let _latestNotes = null, _latestChords = null, _latestTime = 0;
 
+    // Tone-change watcher state
+    let _currentToneName = null;
+    let _toneChangeWall = 0;   // performance.now() of last tone switch, for HUD fade
+
     // Wave C: replace the module-level `song:ready` subscription
     // with a bundle.isReady edge-detect per-instance. The global
     // event fires N times under splitscreen (once per panel's
@@ -870,10 +891,31 @@ function createFactory() {
         _lastRangeHi = -1;
         _displayLo = null;
         _displayHi = null;
+        _currentToneName = null;   // force tone re-apply on first draw after song load
         // Wave C: no _primeLatestSnapshot — we don't consult the
         // bare `window.highway` global anymore (it's the main-
         // player's highway, not ours under splitscreen). First
         // MIDI hits before the first draw() just don't score.
+    }
+
+    // ── Tone change watcher ──
+
+    function _applyToneForTime(tones, t) {
+        if (!tones) return;
+        // Walk sorted changes to find the tone that owns the current position.
+        let activeName = tones.base || null;
+        for (const ch of (tones.changes || [])) {
+            if (ch.t <= t) activeName = ch.name;
+            else break;
+        }
+        if (activeName === _currentToneName) return;
+        _currentToneName = activeName;
+        _toneChangeWall = performance.now();
+        if (!activeName) return;
+        const def = (tones.definitions || []).find(d => d.name === activeName);
+        if (def && def.gm !== undefined) {
+            _synthInit().then(() => _synthLoadInstrumentGM(def.gm));
+        }
     }
 
     // ── Display range update (per-instance) ──
@@ -1275,6 +1317,33 @@ function createFactory() {
             ctx.textAlign = 'right';
             ctx.textBaseline = 'middle';
             ctx.fillText('MIDI', W - 28, 16);
+        }
+
+        // Tone name pill — fades out 2 s after a tone switch.
+        if (_currentToneName) {
+            const age = performance.now() - _toneChangeWall;
+            const fadeStart = 1400, fadeDur = 600;
+            const alpha = age < fadeStart ? 1 : Math.max(0, 1 - (age - fadeStart) / fadeDur);
+            if (alpha > 0) {
+                const label = '♪ ' + _currentToneName;
+                ctx.font = 'bold 10px sans-serif';
+                const tw = ctx.measureText(label).width;
+                const padX = 6, padY = 3;
+                const pillW = tw + padX * 2;
+                const pillH = 10 + padY * 2;
+                const kbTop = H * (1 - KEYBOARD_H_FRAC);
+                const pillY = kbTop - pillH - 6;
+                const pillX = W - pillW - 10;
+
+                ctx.fillStyle = `rgba(8,8,20,${0.78 * alpha})`;
+                _roundRect(ctx, pillX, pillY, pillW, pillH, 4);
+                ctx.fill();
+
+                ctx.fillStyle = `rgba(180,180,220,${alpha})`;
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(label, pillX + padX, pillY + pillH / 2);
+            }
         }
     }
 
@@ -1826,6 +1895,7 @@ function createFactory() {
                 return;
             }
 
+            if (bundle.tones) _applyToneForTime(bundle.tones, bundle.currentTime);
             _draw(bundle.notes, bundle.chords, bundle.currentTime, bundle.beats, bundle.templates);
         },
         resize(/* w, h */) {
