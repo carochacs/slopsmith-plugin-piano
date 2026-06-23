@@ -2213,6 +2213,7 @@ function createFactory() {
             // (or a sane default if the visible window is empty).
             if (!isReady) {
                 if (_pianoCanvas && _pianoCtx) {
+                    _applyCanvasDims();
                     const W = _pianoCanvas.width / (window.devicePixelRatio || 1);
                     const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
                     _pianoCtx.fillStyle = '#040408';
@@ -2220,11 +2221,11 @@ function createFactory() {
                 }
                 return;
             }
+            _applyCanvasDims();
 
             _draw(bundle.notes, bundle.chords, bundle.currentTime, bundle.beats);
         },
         resize(/* w, h */) {
-            if (!_isReady) return;
             _applyCanvasDims();
         },
         destroy() {
