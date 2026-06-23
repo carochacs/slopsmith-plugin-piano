@@ -1216,27 +1216,12 @@ function createFactory() {
     // ── Canvas / overlay management ──
 
     function _applyCanvasDims() {
-        if (!_pianoCanvas || !_pianoCtx) return;
-        // Size to the host highway canvas, not the full panel/#player.
-        // The panel chrome (splitscreen) and #player (main) both include
-        // a control bar at the bottom; sizing the overlay to those would
-        // push the keyboard (bottom 15% of canvas H) underneath the bar,
-        // which paints at z-index 10 over the overlay's z-index 5 and
-        // hides the lower keys. _highwayCanvas is flex:1 in both layouts,
-        // so its clientHeight is exactly the visible above-bar area.
-        // Fallbacks preserve existing behaviour if the highway canvas
-        // happens to be missing (paranoia — init bails earlier without it).
-        const panelChrome = _ssPanelChrome(_highwayCanvas);
-        const srcRect = _highwayCanvas || panelChrome || document.getElementById('player');
-        if (!srcRect) return;
-        const w = srcRect.clientWidth;
-        const h = srcRect.clientHeight;
-        if (!w || !h) return;
+        // The highway canvas is sized and managed by the host; we just
+        // need to re-apply the DPR transform that a canvas.width/height
+        // assignment resets (assigning those attributes clears all
+        // context state including the transform).
+        if (!_pianoCtx) return;
         const dpr = window.devicePixelRatio || 1;
-        _pianoCanvas.width = w * dpr;
-        _pianoCanvas.height = h * dpr;
-        _pianoCanvas.style.width = w + 'px';
-        _pianoCanvas.style.height = h + 'px';
         _pianoCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
@@ -1261,7 +1246,11 @@ function createFactory() {
             // style and nudge them above z-index 5.
             const controls = document.getElementById('player-controls');
             if (controls) {
-                (controls.parentNode || mount).insertBefore(canvas, controls)
+                if (controls.parentNode === mount) {
+                    mount.insertBefore(canvas, controls);
+                } else {
+                    mount.appendChild(canvas);
+                }
                 _prevControlsPosition = controls.style.position;
                 _prevControlsZIndex = controls.style.zIndex;
                 _controlsStyleTouched = true;
@@ -1448,7 +1437,10 @@ function createFactory() {
             panelChrome.appendChild(panel);
         } else {
             const controls = document.getElementById('player-controls');
-            if (controls) (controls.parentNode || mount).insertBefore(panel, controls)
+            if (controls) {
+                if (controls.parentNode === mount) mount.insertBefore(panel, controls);
+                else mount.appendChild(panel);
+            }
             else mount.appendChild(panel);
         }
         _settingsPanel = panel;
@@ -2065,7 +2057,8 @@ function createFactory() {
 
     function _teardown() {
         if (_pianoCanvas) {
-            _pianoCanvas.remove();
+            // _pianoCanvas IS the highway canvas — do not remove it from
+            // the DOM. Just clear our refs so draw() gates correctly.
             _pianoCanvas = null;
             _pianoCtx = null;
         }
@@ -2076,7 +2069,7 @@ function createFactory() {
         _releaseAllHeld();
 
         if (_highwayCanvas) {
-            _highwayCanvas.style.visibility = _prevHighwayDisplay;
+            // We never hid the highway canvas, so nothing to restore.
             _highwayCanvas = null;
             _prevHighwayDisplay = '';
         }
@@ -2140,62 +2133,26 @@ function createFactory() {
             // while still hiding the host's last-painted frame.
             _prevHighwayDisplay = canvas ? canvas.style.visibility : '';
 
-            _pianoCanvas = _createOverlayCanvas();
-            if (!_pianoCanvas) {
-                console.warn('[Piano] init: no mount container available; aborting');
-                return;
-            }
-            _pianoCtx = _pianoCanvas.getContext('2d');
+            // Draw directly on the highway canvas passed to init — no
+            // separate overlay canvas needed. Eliminates the z-index /
+            // position / visibility-hide complexity that broke on layouts
+            // where #player-controls is nested inside #player-footer
+            // (which has z-index:10, above our former overlay's z-index:5).
+            _pianoCanvas = _highwayCanvas;
+            _pianoCtx = _pianoCanvas ? _pianoCanvas.getContext('2d') : null;
             if (!_pianoCtx) {
-                console.warn('[Piano] init: getContext("2d") returned null; aborting');
-                _pianoCanvas.remove();
+                console.warn('[Piano] init: could not get 2d context from highway canvas; aborting');
                 _pianoCanvas = null;
                 _highwayCanvas = null;
                 _prevHighwayDisplay = '';
-                _restoreControlsStyle();
                 return;
             }
 
-            if (_highwayCanvas) _highwayCanvas.style.visibility = 'hidden';
-
             _injectSettingsGear();
-            // The host sizes the highway canvas to
-            // `documentElement.clientHeight - controls.offsetHeight` and
-            // bakes it into the canvas's inline style — not via flex.
-            // Injecting the gear above can push #player-controls onto a
-            // second row, growing its offsetHeight, but the host's last
-            // resize captured the PRE-injection height, so
-            // _highwayCanvas.style.height is now stale (too tall) and
-            // our overlay would inherit that stale height and paint
-            // the keyboard down into the controls.
-            //
-            // Same-tick host.resize() turns out NOT to be enough: at
-            // least one browser path (observed on the slopsmith web
-            // app) doesn't commit the flex-wrap row change before the
-            // synchronous offsetHeight read inside host.resize(), so
-            // the resize uses the pre-wrap height and the canvas
-            // remains too tall. A manual user-driven window resize a
-            // moment later fixes it — i.e. once layout has settled.
-            // Mirror that by running an initial sync pass for the
-            // happy case AND a follow-up rAF pass that fires after
-            // the browser's post-mutation layout commit.
-            //
-            // Safe during init: host.resize() only recurses into our
-            // resize() when _rendererInited is true, and the host
-            // hasn't flipped it yet (it does so only after init()
-            // returns successfully).
-            const _resyncFromHost = () => {
-                try { window.highway && window.highway.resize && window.highway.resize(); }
-                catch (e) { console.warn('[Piano] host resize failed:', e); }
-                _applyCanvasDims();
-            };
-            _resyncFromHost();
-            requestAnimationFrame(() => {
-                // Bail if a teardown happened before the frame fired.
-                if (!_pianoCanvas || !_pianoCtx) return;
-                _resyncFromHost();
-            });
-            window.addEventListener('resize', _onWinResize);
+            // Re-apply DPR transform — the highway resize that ran just
+            // before our init() will have cleared context state via a
+            // canvas.width = … assignment.
+            _applyCanvasDims();
 
             const ss = window.slopsmithSplitscreen;
             // Subscribe only when BOTH on/offFocusChange exist on
