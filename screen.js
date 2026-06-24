@@ -321,6 +321,23 @@ async function _synthLoadInstrument(idx) {
     _synthLoading = false;
 }
 
+async function _synthLoadInstrumentGM(gm) {
+    if (!_synthPlayer || !_audioCtx) return;
+    _synthLoading = true;
+    const varName = _wafVar(gm);
+    try {
+        if (!window[varName]) await _loadScript(_wafUrl(gm));
+        const preset = window[varName];
+        if (preset) {
+            _synthPlayer.adjustPreset(_audioCtx, preset);
+            _synthPreset = preset;
+        }
+    } catch (e) {
+        console.warn('[Piano] Failed to load GM program', gm, e);
+    }
+    _synthLoading = false;
+}
+
 function _synthEnsureCtx() {
     if (_audioCtx && _audioCtx.state === 'suspended') {
         _audioCtx.resume();
@@ -768,6 +785,10 @@ function createFactory() {
     // the user sees.
     let _latestNotes = null, _latestChords = null, _latestTime = 0;
 
+    // Tone-change watcher state
+    let _currentToneName = null;
+    let _toneChangeWall = 0;   // performance.now() of last tone switch, for HUD fade
+
     // Wave C: replace the module-level `song:ready` subscription
     // with a bundle.isReady edge-detect per-instance. The global
     // event fires N times under splitscreen (once per panel's
@@ -992,10 +1013,30 @@ function createFactory() {
         _lastMeasureSongT = -Infinity;
         _songMapLo = null;
         _midiOffset = 0;
+        _currentToneName = null;   // force tone re-apply on first draw after song load
         // Wave C: no _primeLatestSnapshot — we don't consult the
         // bare `window.highway` global anymore (it's the main-
         // player's highway, not ours under splitscreen). First
         // MIDI hits before the first draw() just don't score.
+    }
+
+    // ── Tone change watcher ──
+
+    function _applyToneForTime(tones, t) {
+        if (!tones) return;
+        let activeName = tones.base || null;
+        for (const ch of (tones.changes || [])) {
+            if (ch.t <= t) activeName = ch.name;
+            else break;
+        }
+        if (activeName === _currentToneName) return;
+        _currentToneName = activeName;
+        _toneChangeWall = performance.now();
+        if (!activeName) return;
+        const def = (tones.definitions || []).find(d => d.name === activeName);
+        if (def && def.gm !== undefined) {
+            _synthInit().then(() => _synthLoadInstrumentGM(def.gm));
+        }
     }
 
     // ── Display range update (per-instance) ──
@@ -1512,7 +1553,7 @@ function createFactory() {
 
     // ── Drawing ──
 
-    function _draw(notes, chords, t, beats) {
+    function _draw(notes, chords, t, beats, templates) {
         if (!_pianoCanvas || !_pianoCtx) return;
 
         _latestNotes = notes;
@@ -1598,7 +1639,7 @@ function createFactory() {
         ctx.lineTo(W - padR, nowLineY);
         ctx.stroke();
 
-        _drawScrollingNotes(ctx, notes, chords, t, layout, noteAreaTop, nowLineY);
+        _drawScrollingNotes(ctx, notes, chords, t, layout, noteAreaTop, nowLineY, templates);
         _drawOctaveShiftCues(ctx, notes, chords, t, noteAreaTop, nowLineY, W);
         _drawControllerRangeOverlay(ctx, layout, kbTop, W);
         _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t);
@@ -1620,9 +1661,36 @@ function createFactory() {
             ctx.textBaseline = 'middle';
             ctx.fillText('MIDI', W - 28, 16);
         }
+
+        // Tone name pill — fades out 2 s after a tone switch.
+        if (_currentToneName) {
+            const age = performance.now() - _toneChangeWall;
+            const fadeStart = 1400, fadeDur = 600;
+            const alpha = age < fadeStart ? 1 : Math.max(0, 1 - (age - fadeStart) / fadeDur);
+            if (alpha > 0) {
+                const label = '♪ ' + _currentToneName;
+                ctx.font = 'bold 10px sans-serif';
+                const tw = ctx.measureText(label).width;
+                const padX = 6, padY = 3;
+                const pillW = tw + padX * 2;
+                const pillH = 10 + padY * 2;
+                const kbTop = H * (1 - KEYBOARD_H_FRAC);
+                const pillY = kbTop - pillH - 6;
+                const pillX = W - pillW - 10;
+
+                ctx.fillStyle = `rgba(8,8,20,${0.78 * alpha})`;
+                _roundRect(ctx, pillX, pillY, pillW, pillH, 4);
+                ctx.fill();
+
+                ctx.fillStyle = `rgba(180,180,220,${alpha})`;
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(label, pillX + padX, pillY + pillH / 2);
+            }
+        }
     }
 
-    function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY) {
+    function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY, templates) {
         const allNotes = [];
 
         if (notes) {
@@ -1715,6 +1783,57 @@ function createFactory() {
                 ctx.fillText(midiToNoteName(n.midi), barX + barW / 2 + 0.5, y1 + noteH / 2 + 0.5);
                 ctx.fillStyle = '#fff';
                 ctx.fillText(midiToNoteName(n.midi), barX + barW / 2, y1 + noteH / 2);
+            }
+        }
+
+        // Chord-name floating labels — drawn after all bars so they sit on top.
+        if (_cfg.showNoteNames && chords && templates) {
+            const activeChordLabels = [];
+            for (const c of chords) {
+                const dt = c.t - t;
+                if (dt > VISIBLE_SECONDS + 1) break;
+                if (dt < -1) continue;
+
+                const tmpl = c.tmpl != null ? templates[c.tmpl] : null;
+                const chordName = tmpl && tmpl.name ? tmpl.name : null;
+                if (!chordName) continue;
+
+                let isActive = false;
+                let leftmostMidi = Infinity;
+                for (const cn of (c.notes || [])) {
+                    const dtEnd = (c.t + (cn.sus || 0)) - t;
+                    if (dt <= 0.05 && dtEnd >= -0.05) isActive = true;
+                    const m = noteToMidi(cn.s, cn.f);
+                    if (m < leftmostMidi) leftmostMidi = m;
+                }
+                if (!isActive || leftmostMidi === Infinity) continue;
+
+                const leftKey = keyForMidi(leftmostMidi, layout);
+                if (!leftKey) continue;
+
+                activeChordLabels.push({ name: chordName, x: leftKey.x + leftKey.w / 2 });
+            }
+
+            const labelFontSize = 11;
+            const labelPadX = 5;
+            const labelPadY = 3;
+            const labelH = labelFontSize + labelPadY * 2;
+            const labelY = nowLineY - 8 - labelH;
+
+            ctx.font = `bold ${labelFontSize}px sans-serif`;
+            for (const label of activeChordLabels) {
+                const tw = ctx.measureText(label.name).width;
+                const lx = label.x - tw / 2 - labelPadX;
+                const lw = tw + labelPadX * 2;
+
+                ctx.fillStyle = 'rgba(10,10,28,0.82)';
+                _roundRect(ctx, lx, labelY, lw, labelH, 4);
+                ctx.fill();
+
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(label.name, label.x, labelY + labelH / 2);
             }
         }
     }
@@ -2223,7 +2342,8 @@ function createFactory() {
             }
             _applyCanvasDims();
 
-            _draw(bundle.notes, bundle.chords, bundle.currentTime, bundle.beats);
+            if (bundle.tones) _applyToneForTime(bundle.tones, bundle.currentTime);
+            _draw(bundle.notes, bundle.chords, bundle.currentTime, bundle.beats, bundle.templates);
         },
         resize(/* w, h */) {
             _applyCanvasDims();
