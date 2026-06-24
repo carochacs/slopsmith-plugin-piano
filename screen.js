@@ -94,13 +94,13 @@ function _bestSongMapLo(notes, chords, keyCount) {
     const firstLo = songRange.lo - ((songRange.lo - pitchClass + 1200) % 12);
 
     if (songSpan <= span) {
-        // Entire song fits — pick the octave-aligned placement that centres it best.
-        const idealLo = songRange.lo - Math.floor((span - songSpan) / 2);
-        // Snap to nearest valid candidate (round down, then check round up too).
-        const snapDown = idealLo - ((idealLo - pitchClass + 1200) % 12);
-        const snapUp   = snapDown + 12;
-        const lo = (Math.abs(snapUp - idealLo) < Math.abs(snapDown - idealLo) && snapUp >= 0)
-            ? snapUp : snapDown;
+        // Entire song fits — anchor the song to the left edge of the controller
+        // so pressing controllerLo plays right at the start of the song's range.
+        // "Left-align" by picking the octave-aligned note at or just below
+        // songRange.lo (same pitch class as controllerLo). This way the user
+        // plays the song with their left hand in its natural rest position rather
+        // than hunting for notes in the middle of the keyboard.
+        const lo = songRange.lo - ((songRange.lo - pitchClass + 1200) % 12);
         return Math.max(0, lo);
     }
 
@@ -583,7 +583,7 @@ function detectRange(notes, chords) {
             }
         }
     }
-    if (lo > hi) { lo = 48; hi = 84; }
+    if (lo > hi) { lo = 36; hi = 83; }
     lo = Math.max(0, Math.floor(lo / 12) * 12);
     hi = Math.min(127, Math.ceil((hi + 1) / 12) * 12 - 1);
     while (hi - lo < 47) { hi = Math.min(127, hi + 12); if (hi - lo < 47 && lo > 0) lo -= 12; }
@@ -1014,7 +1014,7 @@ function createFactory() {
         if (_cfg.practiceMode) {
             // Practice: full song range, never shifts.
             const full = detectRange(notes, chords);
-            return (full && full.lo <= full.hi) ? full : { lo: 48, hi: 95 };
+            return (full && full.lo <= full.hi) ? full : { lo: 36, hi: 83 };
         }
 
         // Performance auto-range: use notes currently visible on screen.
@@ -1025,7 +1025,7 @@ function createFactory() {
             // screen never shows black just because no notes are visible yet.
             if (_targetLo !== null) return { lo: _targetLo, hi: _targetHi };
             const full = detectRange(notes, chords);
-            return (full && full.lo <= full.hi) ? full : { lo: 48, hi: 95 };
+            return (full && full.lo <= full.hi) ? full : { lo: 36, hi: 83 };
         }
 
         let lo = Math.max(0, raw.lo - 2);
@@ -2213,6 +2213,7 @@ function createFactory() {
             // (or a sane default if the visible window is empty).
             if (!isReady) {
                 if (_pianoCanvas && _pianoCtx) {
+                    _applyCanvasDims();
                     const W = _pianoCanvas.width / (window.devicePixelRatio || 1);
                     const H = _pianoCanvas.height / (window.devicePixelRatio || 1);
                     _pianoCtx.fillStyle = '#040408';
@@ -2220,11 +2221,11 @@ function createFactory() {
                 }
                 return;
             }
+            _applyCanvasDims();
 
             _draw(bundle.notes, bundle.chords, bundle.currentTime, bundle.beats);
         },
         resize(/* w, h */) {
-            if (!_isReady) return;
             _applyCanvasDims();
         },
         destroy() {
