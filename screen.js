@@ -583,7 +583,7 @@ function detectRange(notes, chords) {
             }
         }
     }
-    if (lo > hi) { lo = 48; hi = 84; }
+    if (lo > hi) { lo = 36; hi = 83; }
     lo = Math.max(0, Math.floor(lo / 12) * 12);
     hi = Math.min(127, Math.ceil((hi + 1) / 12) * 12 - 1);
     while (hi - lo < 47) { hi = Math.min(127, hi + 12); if (hi - lo < 47 && lo > 0) lo -= 12; }
@@ -1014,7 +1014,7 @@ function createFactory() {
         if (_cfg.practiceMode) {
             // Practice: full song range, never shifts.
             const full = detectRange(notes, chords);
-            return (full && full.lo <= full.hi) ? full : { lo: 48, hi: 95 };
+            return (full && full.lo <= full.hi) ? full : { lo: 36, hi: 83 };
         }
 
         // Performance auto-range: use notes currently visible on screen.
@@ -1025,7 +1025,7 @@ function createFactory() {
             // screen never shows black just because no notes are visible yet.
             if (_targetLo !== null) return { lo: _targetLo, hi: _targetHi };
             const full = detectRange(notes, chords);
-            return (full && full.lo <= full.hi) ? full : { lo: 48, hi: 95 };
+            return (full && full.lo <= full.hi) ? full : { lo: 36, hi: 83 };
         }
 
         let lo = Math.max(0, raw.lo - 2);
