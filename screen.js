@@ -94,13 +94,13 @@ function _bestSongMapLo(notes, chords, keyCount) {
     const firstLo = songRange.lo - ((songRange.lo - pitchClass + 1200) % 12);
 
     if (songSpan <= span) {
-        // Entire song fits — pick the octave-aligned placement that centres it best.
-        const idealLo = songRange.lo - Math.floor((span - songSpan) / 2);
-        // Snap to nearest valid candidate (round down, then check round up too).
-        const snapDown = idealLo - ((idealLo - pitchClass + 1200) % 12);
-        const snapUp   = snapDown + 12;
-        const lo = (Math.abs(snapUp - idealLo) < Math.abs(snapDown - idealLo) && snapUp >= 0)
-            ? snapUp : snapDown;
+        // Entire song fits — anchor the song to the left edge of the controller
+        // so pressing controllerLo plays right at the start of the song's range.
+        // "Left-align" by picking the octave-aligned note at or just below
+        // songRange.lo (same pitch class as controllerLo). This way the user
+        // plays the song with their left hand in its natural rest position rather
+        // than hunting for notes in the middle of the keyboard.
+        const lo = songRange.lo - ((songRange.lo - pitchClass + 1200) % 12);
         return Math.max(0, lo);
     }
 
