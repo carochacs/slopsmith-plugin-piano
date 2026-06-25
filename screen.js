@@ -56,6 +56,7 @@ const STORE_KEYS = {
     controllerLo:  'piano_ctrl_lo',     // lowest MIDI note the physical controller sends
     octaveRemap:   'piano_oct_remap',   // whether dynamic octave remapping is active
     practiceMode:  'piano_practice',    // true = full-song range locked; false = dynamic remap
+    handFilter:    'piano_hand_filter', // 'both' | 'L' | 'R'
 };
 
 // Standard keyboard sizes: key count → [loMidi, hiMidi] centered on middle C (60)
@@ -155,6 +156,7 @@ const _cfg = {
     controllerLo:  parseInt(_readStore(STORE_KEYS.controllerLo) || '48'), // default C3
     octaveRemap:   _readStore(STORE_KEYS.octaveRemap) !== 'false',        // on by default
     practiceMode:  _readStore(STORE_KEYS.practiceMode) === 'true',        // off by default
+    handFilter:    _readStore(STORE_KEYS.handFilter) || 'both',
 };
 
 function _saveCfg(key, val) {
@@ -1472,6 +1474,16 @@ function createFactory() {
                         ).join('')}
                     </select>
                 </div>
+                <div class="piano-hand-filter-wrap" style="display:flex;align-items:center;gap:3px;">
+                    <span style="font-size:10px;color:#666;">Hand</span>
+                    ${['both','L','R'].map(v => {
+                        const label = v === 'both' ? 'Both' : v === 'L' ? 'LH' : 'RH';
+                        const active = _cfg.handFilter === v;
+                        return `<button class="piano-hand-btn" data-hand="${v}" type="button"
+                            style="background:${active ? '#4080e0' : '#1a1a2e'};border:1px solid ${active ? '#4080e0' : '#333'};
+                            border-radius:4px;padding:2px 6px;font-size:11px;color:${active ? '#fff' : '#aaa'};cursor:pointer;">${label}</button>`;
+                    }).join('')}
+                </div>
             </div>`;
 
         if (panelChrome) {
@@ -1541,6 +1553,17 @@ function createFactory() {
             _saveCfg('controllerLo', parseInt(this.value));
             _resetDisplayRange();
         };
+        for (const btn of panel.querySelectorAll('.piano-hand-btn')) {
+            btn.onclick = function () {
+                _saveCfg('handFilter', this.dataset.hand);
+                for (const b of panel.querySelectorAll('.piano-hand-btn')) {
+                    const active = b.dataset.hand === _cfg.handFilter;
+                    b.style.background = active ? '#4080e0' : '#1a1a2e';
+                    b.style.borderColor = active ? '#4080e0' : '#333';
+                    b.style.color = active ? '#fff' : '#aaa';
+                }
+            };
+        }
     }
 
     function _removeSettingsPanel() {
@@ -1693,12 +1716,16 @@ function createFactory() {
     function _drawScrollingNotes(ctx, notes, chords, t, layout, topY, nowLineY, templates) {
         const allNotes = [];
 
+        const _hf = _cfg.handFilter;
+        const _notePassesFilter = (h) => _hf === 'both' || !h || h === _hf;
+
         if (notes) {
             for (const n of notes) {
                 const dt = n.t - t;
                 if (dt > VISIBLE_SECONDS + 1) break;
                 if (dt < -1 && (n.t + (n.sus || 0)) < t - 0.5) continue;
-                allNotes.push({ midi: noteToMidi(n.s, n.f) + _midiOffset, t: n.t, sus: n.sus || 0, accent: n.ac });
+                if (!_notePassesFilter(n.h)) continue;
+                allNotes.push({ midi: noteToMidi(n.s, n.f) + _midiOffset, t: n.t, sus: n.sus || 0, accent: n.ac, hand: n.h || '' });
             }
         }
         if (chords) {
@@ -1707,7 +1734,8 @@ function createFactory() {
                 if (dt > VISIBLE_SECONDS + 1) break;
                 if (dt < -1) continue;
                 for (const cn of (c.notes || [])) {
-                    allNotes.push({ midi: noteToMidi(cn.s, cn.f) + _midiOffset, t: c.t, sus: cn.sus || 0, accent: cn.ac });
+                    if (!_notePassesFilter(cn.h)) continue;
+                    allNotes.push({ midi: noteToMidi(cn.s, cn.f) + _midiOffset, t: c.t, sus: cn.sus || 0, accent: cn.ac, hand: cn.h || '' });
                 }
             }
         }
@@ -1745,6 +1773,15 @@ function createFactory() {
             const [cr, cg, cb] = _neonRGB(n.midi);
             const df = isOnBlack ? 0.7 : 1.0;
             let r = cr * df, g = cg * df, b = cb * df;
+
+            // Tint by hand when both hands shown together (so they are visually distinct)
+            if (_hf === 'both' && n.hand === 'L') {
+                // Left hand → cooler / bluer
+                r = Math.max(0, r - 0.15); b = Math.min(1, b + 0.25);
+            } else if (_hf === 'both' && n.hand === 'R') {
+                // Right hand → warmer / more orange
+                r = Math.min(1, r + 0.25); b = Math.max(0, b - 0.15);
+            }
 
             if (useHitColor) { r = 0; g = 1; b = 0.27; }
             else if (useMissColor) { r = 0.33; g = 0.33; b = 0.4; }
@@ -1980,8 +2017,11 @@ function createFactory() {
     function _drawKeyboard(ctx, layout, kbTop, kbH, notes, chords, t) {
         const songActiveSet = new Set();
         const window_ = 0.06;
+        const _hf = _cfg.handFilter;
+        const _notePassesFilter = (h) => _hf === 'both' || !h || h === _hf;
         if (notes) {
             for (const n of notes) {
+                if (!_notePassesFilter(n.h)) continue;
                 if (n.t > t + window_) continue;
                 const end = n.t + (n.sus || 0);
                 if (end < t - window_) continue;
@@ -1994,6 +2034,7 @@ function createFactory() {
                 if (c.t > t + window_) continue;
                 if (c.t < t - 1) continue;
                 for (const cn of (c.notes || [])) {
+                    if (!_notePassesFilter(cn.h)) continue;
                     const end = c.t + (cn.sus || 0);
                     if (c.t <= t + window_ && end >= t - window_)
                         songActiveSet.add(noteToMidi(cn.s, cn.f) + _midiOffset);
