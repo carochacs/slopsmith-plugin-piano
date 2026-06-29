@@ -53,6 +53,7 @@ const STORE_KEYS = {
     showNoteNames: 'piano_note_names',
     hitDetection:  'piano_hit_detect',
     keyCount:      'piano_key_count',   // 0 = auto-detect from song
+    controllerLo:  'piano_ctrl_lo',     // lowest MIDI note the physical controller sends
     octaveRemap:   'piano_oct_remap',   // whether dynamic octave remapping is active
     practiceMode:  'piano_practice',    // true = full-song range locked; false = dynamic remap
 };
@@ -151,7 +152,7 @@ const _cfg = {
     showNoteNames: _readStore(STORE_KEYS.showNoteNames) !== 'false',
     hitDetection:  _readStore(STORE_KEYS.hitDetection) === 'true',
     keyCount:      parseInt(_readStore(STORE_KEYS.keyCount) || '0'),
-    controllerLo:  48, // auto-detected from incoming MIDI; default C3
+    controllerLo:  parseInt(_readStore(STORE_KEYS.controllerLo) || '60'), // default C4 (pitch class C)
     octaveRemap:   _readStore(STORE_KEYS.octaveRemap) !== 'false',        // on by default
     practiceMode:  _readStore(STORE_KEYS.practiceMode) === 'true',        // off by default
 };
@@ -194,11 +195,6 @@ let _playerScriptLoaded = false;
 let _pitchBendSemitones = 0;           // current pitch bend in semitones
 const PITCH_BEND_RANGE_ST = 2;         // ±2 semitones (standard)
 let _modValue = 0;                     // CC#1 modulation wheel, 0–1 normalized
-
-// ── Controller range auto-detection ──────────────────────────────────
-// Rolling 3-second window of incoming note-ons, used to detect the
-// controller's actual lowest key and physical octave transpositions.
-let _autoNoteWindow = [];
 
 // ═══════════════════════════════════════════════════════════════════════
 // MIDI / Color Helpers
@@ -478,35 +474,6 @@ function _midiOnMessage(e) {
     if (_cfg.midiChannel >= 0 && ch !== _cfg.midiChannel) return;
 
     const cmd = status & 0xF0;
-
-    // ── Controller auto-detect: track rolling minimum to determine controllerLo ──
-    if (cmd === 0x90 && velocity > 0) {
-        const now = performance.now();
-        // Trim entries older than 3 s.
-        let i = 0;
-        while (i < _autoNoteWindow.length && now - _autoNoteWindow[i].time > 3000) i++;
-        if (i > 0) _autoNoteWindow.splice(0, i);
-        _autoNoteWindow.push({ time: now, midi: note });
-
-        // Compute rolling window minimum.
-        let winMin = note;
-        for (const e of _autoNoteWindow) if (e.midi < winMin) winMin = e.midi;
-
-        if (winMin < _cfg.controllerLo) {
-            // New low note seen — controller extends lower than assumed (or transposed down).
-            _cfg.controllerLo = winMin;
-            if (_activeInstance) _activeInstance._resetControllerLo();
-        } else if (_autoNoteWindow.length >= 3 && winMin >= _cfg.controllerLo + 12) {
-            // All notes in the 3-second window are at least one octave above the assumed
-            // controllerLo — the player likely pressed the physical transpose-up button.
-            // Jump controllerLo forward by however many full octaves the window minimum
-            // implies (handles multi-octave skips in one step).
-            const octavesUp = Math.floor((winMin - _cfg.controllerLo) / 12);
-            _cfg.controllerLo += octavesUp * 12;
-            _autoNoteWindow = []; // reset so the new baseline is learned fresh
-            if (_activeInstance) _activeInstance._resetControllerLo();
-        }
-    }
 
     // Pass the RAW MIDI note number to instance handlers; the
     // instance applies transpose internally and remembers the
@@ -1202,11 +1169,6 @@ function createFactory() {
         _cachedLayout = null;
     }
 
-    // Called by the module-level auto-detect when controllerLo changes.
-    function _resetControllerLo() {
-        _resetDisplayRange();
-    }
-
     // ── Range mismatch badge ──
 
     // Returns how many unique MIDI pitches in the song fall outside the
@@ -1510,6 +1472,16 @@ function createFactory() {
                     <input type="checkbox" class="piano-chk-practice" ${_cfg.practiceMode ? 'checked' : ''}
                         style="accent-color:#22cc66;"> Practice
                 </label>
+                <div class="piano-ctrl-lo-wrap" style="display:${_cfg.keyCount > 0 ? 'flex' : 'none'};align-items:center;gap:4px;">
+                    <span style="font-size:10px;color:#666;">Lo key</span>
+                    <select class="piano-ctrl-lo-select" style="background:#1a1a2e;border:1px solid #333;border-radius:6px;
+                        padding:3px 6px;font-size:11px;color:#ccc;outline:none;">
+                        ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'].map((name, i) => {
+                            const midi = 60 + i; // anchor to octave 4
+                            return `<option value="${midi}"${(_cfg.controllerLo % 12) === i ? ' selected' : ''}>${name}</option>`;
+                        }).join('')}
+                    </select>
+                </div>
             </div>`;
 
         if (panelChrome) {
@@ -1573,6 +1545,12 @@ function createFactory() {
         };
         panel.querySelector('.piano-chk-practice').onchange = function () {
             _saveCfg('practiceMode', this.checked);
+            _resetDisplayRange();
+        };
+        panel.querySelector('.piano-ctrl-lo-select').onchange = function () {
+            // Store the pitch-class-aligned MIDI note (octave 4 anchor).
+            // controllerLo % 12 gives the pitch class used by _bestSongMapLo.
+            _saveCfg('controllerLo', parseInt(this.value));
             _resetDisplayRange();
         };
     }
@@ -2417,7 +2395,6 @@ function createFactory() {
         _handleNoteOff,
         _handleSustain,
         _releaseAllHeld,
-        _resetControllerLo,
     };
 
     return instance;
