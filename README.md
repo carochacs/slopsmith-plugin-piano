@@ -25,13 +25,26 @@ A plugin for [Slopsmith](https://github.com/byrongamatos/slopsmith) that replace
 
 ## Installation
 
+**Docker (web version)**
 ```bash
 cd /path/to/slopsmith/plugins
 git clone https://github.com/byrongamatos/slopsmith-plugin-piano.git piano
 docker compose restart
 ```
 
+**Desktop app** — clone into the platform plugins directory:
+
+| Platform | Plugins directory |
+|----------|-------------------|
+| Windows  | `%APPDATA%\slopsmith-desktop\plugins\` |
+| macOS    | `~/Library/Application Support/slopsmith-desktop/plugins/` |
+| Linux    | `~/.config/slopsmith-desktop/plugins/` |
+
+Then restart the app.
+
 A "Piano" button will appear in the player controls when you play a song. Click the gear icon next to it to configure MIDI input and sound settings.
+
+> **MIDI permission:** On first use, Chrome/Edge will ask for permission to access MIDI devices. Click **Allow** — the plugin cannot detect your keyboard without it.
 
 ## How It Works
 
