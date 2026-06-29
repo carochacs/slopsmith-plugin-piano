@@ -496,17 +496,15 @@ function _midiOnMessage(e) {
             // New low note seen — controller extends lower than assumed (or transposed down).
             _cfg.controllerLo = winMin;
             if (_activeInstance) _activeInstance._resetControllerLo();
-        } else if (_cfg.keyCount > 0 && _autoNoteWindow.length >= 3) {
-            // Transpose-up detection: if all notes in the window are >= controllerLo + 12
-            // and the window minimum is close to controllerLo + 12, the player likely
-            // pressed the physical transpose-up button once.
-            const threshold = _cfg.controllerLo + 12;
-            const allAbove = winMin >= threshold && winMin <= threshold + 2;
-            if (allAbove && _autoNoteWindow.every(e => e.midi >= _cfg.controllerLo + 12)) {
-                _cfg.controllerLo += 12;
-                _autoNoteWindow = []; // reset so the new baseline is learned fresh
-                if (_activeInstance) _activeInstance._resetControllerLo();
-            }
+        } else if (_autoNoteWindow.length >= 3 && winMin >= _cfg.controllerLo + 12) {
+            // All notes in the 3-second window are at least one octave above the assumed
+            // controllerLo — the player likely pressed the physical transpose-up button.
+            // Jump controllerLo forward by however many full octaves the window minimum
+            // implies (handles multi-octave skips in one step).
+            const octavesUp = Math.floor((winMin - _cfg.controllerLo) / 12);
+            _cfg.controllerLo += octavesUp * 12;
+            _autoNoteWindow = []; // reset so the new baseline is learned fresh
+            if (_activeInstance) _activeInstance._resetControllerLo();
         }
     }
 
