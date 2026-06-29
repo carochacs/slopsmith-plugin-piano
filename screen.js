@@ -491,6 +491,12 @@ function _midiOnMessage(e) {
     } else if (cmd === 0xB0 && note === 1) {
         // Modulation wheel (CC#1): store normalized value for future use.
         _modValue = velocity / 127;
+    } else if (cmd === 0xC0) {
+        // Program Change: match by GM number first, fall back to array index.
+        const gmIdx = INSTRUMENTS.findIndex(inst => inst.gm === note);
+        const idx = gmIdx >= 0 ? gmIdx : note % INSTRUMENTS.length;
+        _saveCfg('instrumentIdx', idx);
+        _synthLoadInstrument(idx);
     } else if (cmd === 0xE0) {
         // Pitch bend: 14-bit signed value centered at 8192.
         const raw14 = ((velocity & 0x7F) << 7) | (note & 0x7F);
