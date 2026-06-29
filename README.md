@@ -80,4 +80,4 @@ Select from 10 General MIDI sounds via the settings panel:
 
 ## License
 
-MIT
+[MIT](LICENSE.txt)
