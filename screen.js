@@ -2090,8 +2090,9 @@ function createFactory() {
             }
 
             if (pressed) {
+                const vel = playerHeld ? (_heldNotes.get(k.midi) || 80) : 80;
                 ctx.shadowColor = _rgbStr(fr, fg, fb);
-                ctx.shadowBlur = 12;
+                ctx.shadowBlur = 8 + (vel / 127) * 16;
                 ctx.fillStyle = 'rgba(0,0,0,0)';
                 _roundRectBottom(ctx, k.x, kbTop + pressOffset, kw, kbH - pressOffset, cornerR);
                 ctx.fill();
@@ -2163,8 +2164,9 @@ function createFactory() {
             }
 
             if (pressed) {
+                const vel = playerHeld ? (_heldNotes.get(k.midi) || 80) : 80;
                 ctx.shadowColor = _rgbStr(fr, fg, fb);
-                ctx.shadowBlur = 10;
+                ctx.shadowBlur = 6 + (vel / 127) * 14;
                 ctx.fillStyle = 'rgba(0,0,0,0)';
                 _roundRectBottom(ctx, k.x, kbTop + pressOffset, k.w, blackH - pressOffset, 3);
                 ctx.fill();
