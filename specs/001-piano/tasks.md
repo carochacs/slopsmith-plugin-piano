@@ -51,10 +51,7 @@
 
 ## Cross-cutting
 
-- [OPEN] T601 [P] Tests — no test harness in repo. The renderer's
-  display-range auto-zoom and the `string * 24 + fret` decoding
-  are unit-test-shaped. Could mirror the
-  `slopsmith-plugin-notedetect` `vm`-loader pattern.
+- [DONE] T601 [P] Tests — `tests/test_piano_logic.js` covers `noteToMidi` (6 cases) and `detectRange` (11 cases: alignment, boundary expansion, chord/note mixing, null/empty defaults). Run with `node tests/test_piano_logic.js`.
 - [OPEN] T602 [P] Velocity-modulated visuals (color stays
   per-pitch, but velocity could control opacity / glow size).
 - [OPEN] T603 [P] User-supplied SoundFont loading.
