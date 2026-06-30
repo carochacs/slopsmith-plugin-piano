@@ -51,12 +51,12 @@
 
 ## Cross-cutting
 
-- [OPEN] T601 [P] Tests — no test harness in repo. The renderer's
-  display-range auto-zoom and the `string * 24 + fret` decoding
-  are unit-test-shaped. Could mirror the
-  `slopsmith-plugin-notedetect` `vm`-loader pattern.
-- [OPEN] T602 [P] Velocity-modulated visuals (color stays
-  per-pitch, but velocity could control opacity / glow size).
+- [DONE] T601 [P] Tests — `tests/test_piano_logic.js` covers `noteToMidi` (6 cases) and `detectRange` (11 cases: alignment, boundary expansion, chord/note mixing, null/empty defaults). Run with `node tests/test_piano_logic.js`.
+- [DONE] T602 [P] Velocity-modulated visuals — keyboard key glow
+  (shadowBlur) now scales with MIDI velocity: white keys 8–24 px,
+  black keys 6–20 px (baseline ~12/10 at vel=64). Color stays
+  per-pitch. Chart notes (no velocity data) use vel=80 as a neutral
+  default. Change is in the two `if (pressed)` blocks in _drawKeyboard.
 - [OPEN] T603 [P] User-supplied SoundFont loading.
 - [OPEN] T604 [P] Capture played notes to a MIDI file (more
   naturally lives in the editor plugin per existing prompts).
