@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit config for the Slopsmith Piano Highway plugin — a frontend-only
+# `type: "visualization"` plugin (no routes.py / backend).
+
+language: en-US
+early_access: false
+
+tone_instructions: >-
+  This repo is developed by a solo maintainer working with Claude Code
+  agents. Prioritize correctness in the render loop and MIDI/Web Audio
+  handling over style nits.
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/*.min.js"
+    - "!**/node_modules/**"
+  path_instructions:
+    - path: "screen.js"
+      instructions: |
+        Vanilla JS IIFE (~2500 lines), loaded as a plain `<script>` tag —
+        no bundler, no framework, no build step; don't suggest one. This
+        plugin exports `window.slopsmithViz_piano` (a `type: "visualization"`
+        renderer factory per core Slopsmith's setRenderer contract) —
+        `init(canvas, bundle)` / `draw(bundle)` / `resize(w, h)` /
+        `destroy()` follow a documented lifecycle where the same instance
+        can be re-init'd after destroy(); don't flag that as a leaked/reused
+        object, and don't suggest the factory itself hold state (it must
+        return a fresh object per call for multi-panel/splitscreen use).
+        `contextType`/`matchesArrangement` are read as statics on the
+        factory function, not the instance — that's required by the
+        contract, not misplaced code. Do flag: WebGL/2D context leaks
+        across `init()`/`destroy()` cycles, and MIDI (`Web MIDI API`) or
+        sustain-pedal (CC#64) state not reset on `destroy()`.
+    - path: "**/*.md"
+      instructions: |
+        Documentation. Don't request docstring coverage in code based on
+        gaps here.
+
+chat:
+  auto_reply: true
